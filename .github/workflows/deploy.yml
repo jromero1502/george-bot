@@ -157,17 +157,27 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      # Replaces `func azure functionapp publish --python` from deploy.ps1
-      # (that script rewrites $env:Path from the Windows registry, so it
-      # isn't portable to a Linux runner). scm-do-build-during-deployment /
-      # enable-oryx-build reproduce the remote build Core Tools does under
-      # the hood — functionapp.bicep sets neither app setting itself.
-      - uses: Azure/functions-action@v1
-        with:
-          app-name: ${{ needs.infra.outputs.functionAppName }}
-          package: src
-          scm-do-build-during-deployment: true
-          enable-oryx-build: true
+      # NOT Azure/functions-action: for Linux Consumption + RBAC/OIDC auth
+      # (our exact setup) that action's derivePublishMethod() unconditionally
+      # picks WebsiteRunFromPackageDeploy — it uploads the raw zip to blob
+      # storage and points WEBSITE_RUN_FROM_PACKAGE at it with NO build step
+      # at all, silently ignoring scm-do-build-during-deployment/
+      # enable-oryx-build/remote-build for this SKU+auth combination. That
+      # shipped a package with zero installed dependencies — the Python
+      # worker never started and every function silently failed to load
+      # (host stayed "Running", 0 functions registered, /api/health → 404).
+      # Azure Functions Core Tools (same as infra/deploy.ps1's manual path)
+      # actually builds a self-contained package and deploys via Kudu using
+      # the az CLI session azure/login already established — no publish
+      # profile needed. deploy.ps1's own $env:Path rewrite (Windows registry
+      # lookup) doesn't apply here; `npm install -g` already puts `func` on
+      # PATH on a Linux runner.
+      - name: Install Azure Functions Core Tools
+        run: npm install -g azure-functions-core-tools@4 --unsafe-perm true
+
+      - name: Publish via func (builds + installs dependencies)
+        working-directory: src
+        run: func azure functionapp publish "${{ needs.infra.outputs.functionAppName }}" --python
 
   post-deploy:
     needs: [infra, publish]

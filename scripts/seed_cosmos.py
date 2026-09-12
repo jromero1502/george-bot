@@ -104,6 +104,7 @@ def main() -> None:
         "reminders": "/id",
         "pqrs": "/tenantId",
         "platformConfig": "/id",
+        "records": "/tenantId",
     }
     for name, pk_path in containers.items():
         database.create_container_if_not_exists(id=name, partition_key=PartitionKey(path=pk_path))

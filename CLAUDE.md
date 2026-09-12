@@ -27,10 +27,12 @@ src/
     agent.py           Loop manual de tool use con Haiku (no el tool_runner beta del SDK)
     prompts.py         System prompt de George — por tenant, platform_admin, o pending_business_selection
     scheduling.py       cron/once -> nextRunAt en UTC (croniter + zoneinfo)
+    record_schema.py    Validación pura de tipos de registro definidos por el owner y sus valores
     telegram.py         Cliente Telegram Bot API (respeta DRY_RUN)
     groq_stt.py          Transcripción de voz
     tools/               Un módulo por dominio + registry.py que los agrega + tenants.py (platform_admin)
                          + membership.py (list_my_businesses/switch_business — gestión de la propia membership)
+                         + records.py (tipos de registro propios del negocio — stock, asistencia, etc.)
     repositories/        Un módulo por contenedor de Cosmos + cosmos.py (factory de cliente) + tenants.py
 scripts/          seed_cosmos.py, simulate_update.py, set_webhook.ps1, local_up.ps1
 tests/            pytest — scheduling y gating de tools/tenant, sin dependencias externas
@@ -102,6 +104,40 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
   corresponda al rubro de cada tenant. El system prompt (`prompts.py`) arma el contexto de
   negocio dinámicamente desde `tenants.businessType`/`description`/`currency`/`itemLabel*`, así
   que no hay ramas de código por rubro — toda la especialización vive en los datos del tenant.
+- **Tipos de registro definidos por el owner (`records`, contenedor nuevo, `/tenantId`)**:
+  `clients[].items[]` describe activos de un cliente; lo que faltaba era que el owner llevara
+  cosas del negocio **en el tiempo** que no son ni un item ni un movimiento de `finance` ni un
+  `pqrs` (stock, asistencia, ventas del día, mantenimientos — depende del rubro). El owner
+  declara la forma con `define_record_type` (owner-only) conversando con George — nombre,
+  campos tipados (`text|number|date|boolean|choice`), `mode` (`snapshot` = tiene un valor actual
+  que se reemplaza, ej. stock; `event` = se acumula en el tiempo, ej. asistencia), un
+  `measureField` (el campo numérico que se agrega en reportes) y opcionalmente un `groupField`
+  (por el que se agrupan) y `clientLink` (si un registro puede/debe atarse a un `clientId`
+  existente). Un mismo contenedor guarda definiciones (`docType: "type_definition"`, `id =
+  "type::<typeKey>"` — la unicidad del `typeKey` dentro del tenant la garantiza Cosmos, no una
+  query de chequeo) y registros (`docType: "record"`). `record_schema.py` valida todo esto sin
+  tocar Cosmos (mismo rol que `scheduling.py`); `tools/records.py` traduce sus `ValueError` a
+  `ToolError`. Cada registro guarda `values{}` (los campos tal cual los declaró el owner) más
+  `amount`/`groupKey` **denormalizados** desde `measureField`/`groupField` — Cosmos SQL no admite
+  una ruta de propiedad parametrizada (`c.values[@campo]` no existe), así que agregar por un
+  campo elegido en runtime forzaría a interpolar su nombre en el WHERE/GROUP BY; con `amount`/
+  `groupKey` en rutas fijas, `repositories/records.py::search_records`/`summarize_records`
+  quedan parametrizadas como cualquier otra query del repo. `summarize_records` reduce en
+  Python en vez de con un `GROUP BY` de Cosmos: el modo `snapshot` necesita "el registro más
+  reciente por grupo", que es un self-join que Cosmos SQL no expresa directamente, y a la escala
+  de este bot (small businesses, un query por reporte) traer hasta 500 registros y reducirlos en
+  memoria es más simple que dos rutas de agregación distintas. El prompt (`prompts.py`) inyecta
+  los tipos activos del tenant en `ToolContext.record_types` (cargados una vez por mensaje en
+  `function_app.process_update`, igual que `ctx.tenant`) para que George sepa qué existe sin
+  gastar un turno en `list_record_types`, y tiene una regla explícita de detección proactiva:
+  cuando el usuario describe algo que quiere llevar en el tiempo, George debe preguntar la
+  estructura y confirmarla ANTES de llamar `define_record_type` — nunca inventar `type_key` ni
+  campos. Los recordatorios (`tools/reminders.py`) suman `kind="report"`: `reminder_worker`
+  (`function_app.py`) arma un `ToolContext` con `role="owner"` para poder leer cualquier tipo,
+  pero llama `agent.generate_report_message`, que corre el mismo loop de tool-use que
+  `run_agent` restringido (vía el nuevo `only=` en `registry.anthropic_tool_defs`/`dispatch`) a
+  `list_record_types`/`search_records`/`summarize_records` — un reporte programado nunca puede
+  escribir nada, aunque el rol con el que corre sí podría.
 - **`PLATFORM_ADMIN_CHAT_ID`** (antes `OWNER_CHAT_ID`) es el chat que recibe alertas de la cola
   envenenada y el que se siembra con `isPlatformAdmin: true` — ya no es "el dueño del negocio",
   es el operador de toda la plataforma.
@@ -280,7 +316,7 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
   `set_platform_admin` hace merge sin tocar `memberships`) — seguro de correr en cada deploy.
   Con ellas, crearía negocios de demo en producción cada vez.
 
-## Esquema de datos (Cosmos DB, 8 contenedores)
+## Esquema de datos (Cosmos DB, 9 contenedores)
 
 Todos con un campo `custom: {}` libre para extender sin migraciones. `createdAt`/`updatedAt`
 en ISO-8601 UTC.
@@ -295,6 +331,7 @@ en ISO-8601 UTC.
 | `pqrs` | `/tenantId` | Peticiones/quejas/reclamos/sugerencias, `reportedBy`, `status`. |
 | `conversations` | `/chatId` | Auditoría por turno: tokens, costo, latencia, tool calls. `tenantId` como metadato (no se usa para filtrar, ya está implícito en `chatId`). |
 | `platformConfig` | `/id` | Config de plataforma, gestionada por `platform_admin`. Un solo doc hoy (`id: "default_reminders"`): `templates[]` que `create_tenant` siembra en cada negocio nuevo (ver `get_default_reminder_templates`/`set_default_reminder_templates` en `tools/tenants.py`). No afecta negocios ya creados. |
+| `records` | `/tenantId` | Tipos de registro definidos por el owner (`docType: "type_definition"`, `id: "type::<typeKey>"`, `fields[]`, `mode`, `measureField`, `groupField`, `clientLink`) y los registros cargados contra ellos (`docType: "record"`, `values{}`, `amount`/`groupKey` denormalizados, `occurredAt`, `period`). Ver la nota sobre "Tipos de registro definidos por el owner" más arriba. |
 
 ## Comandos útiles
 

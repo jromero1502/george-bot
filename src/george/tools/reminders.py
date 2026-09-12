@@ -108,7 +108,10 @@ TOOLS = [
         description=(
             "Crea o actualiza un recordatorio (omite reminder_id para crear uno nuevo). "
             "kind='message' envia el texto de 'body' tal cual; kind='prompt' usa 'body' como instruccion "
-            "para que George redacte el mensaje al momento de enviarlo. "
+            "para que George redacte el mensaje al momento de enviarlo; kind='report' usa 'body' como instruccion "
+            "de un reporte (ej. 'resumi el stock actual por sabor', 'cuantas asistencias hubo esta semana por "
+            "perro') — George consulta los tipos de registro de este negocio (search_records/summarize_records) "
+            "y arma el mensaje con los datos reales, sin poder escribir nada. "
             "schedule.type='cron' usa una expresion cron estandar (ej. '0 20 * * *' = todos los dias 8pm); "
             "schedule.type='once' usa run_at (fecha-hora ISO) y se marca como completado tras ejecutarse una vez."
         ),
@@ -117,7 +120,7 @@ TOOLS = [
             "properties": {
                 "reminder_id": {"type": "string"},
                 "name": {"type": "string"},
-                "kind": {"type": "string", "enum": ["message", "prompt"]},
+                "kind": {"type": "string", "enum": ["message", "prompt", "report"]},
                 "body": {"type": "string"},
                 "schedule": {
                     "type": "object",

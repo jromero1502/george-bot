@@ -14,12 +14,13 @@ from typing import Any, List, Optional
 import azure.functions as func
 
 from george import telegram
-from george.agent import generate_reminder_message, run_agent
+from george.agent import AgentResult, generate_reminder_message, generate_report_message, run_agent
 from george.config import estimate_cost_usd, settings
 from george.groq_stt import transcribe
 from george import roles
 from george.repositories import chats as chats_repo
 from george.repositories import conversations as conversations_repo
+from george.repositories import records as records_repo
 from george.repositories import reminders as reminders_repo
 from george.repositories import tenants as tenants_repo
 from george.repositories.cosmos import get_database
@@ -206,6 +207,8 @@ def process_update(msg: func.QueueMessage) -> None:
         telegram.send_message(chat_id, error_message)
         return
 
+    record_types = tuple(records_repo.list_record_types(tenant_id)) if tenant_id else ()
+
     user_name = (message.get("from") or {}).get("first_name") or chat.get("name") or chat_id
     ctx = ToolContext(
         chat_id=chat_id,
@@ -215,6 +218,7 @@ def process_update(msg: func.QueueMessage) -> None:
         tenant_id=tenant_id,
         tenant=tenant,
         is_platform_admin=bool(chat.get("isPlatformAdmin")),
+        record_types=record_types,
     )
 
     telegram.send_chat_action(chat_id, "typing")
@@ -392,9 +396,25 @@ def reminder_worker(msg: func.QueueMessage) -> None:
         return
 
     body = payload.get("body", "")
+    report_result: Optional[AgentResult] = None
     if payload.get("kind") == "prompt":
         tenant = tenants_repo.get_tenant(payload["tenantId"]) if payload.get("tenantId") else None
         text = generate_reminder_message(body, tenant)
+    elif payload.get("kind") == "report":
+        tenant = tenants_repo.get_tenant(payload["tenantId"]) if payload.get("tenantId") else None
+        # role='owner' so the read tools below aren't blocked by require_role,
+        # but generate_report_message restricts the actual tool surface to
+        # the record-reading tools only — see agent._REPORT_TOOL_NAMES.
+        report_ctx = ToolContext(
+            chat_id=chat_ids[0],
+            role="owner",
+            user_name="George",
+            correlation_id=new_id(),
+            tenant_id=payload.get("tenantId"),
+            tenant=tenant,
+        )
+        report_result = generate_report_message(body, report_ctx)
+        text = report_result.reply_text
     else:
         text = body
 
@@ -402,17 +422,31 @@ def reminder_worker(msg: func.QueueMessage) -> None:
     for chat_id in chat_ids:
         try:
             telegram.send_message(chat_id, text)
-            conversations_repo.create_conversation(
-                chat_id,
-                tenantId=payload.get("tenantId"),
-                userId="system",
-                userName="George",
-                role="system",
-                direction="outbound",
-                input={"type": "reminder", "text": None, "transcript": None},
-                output={"text": text},
-                trace={"correlationId": new_id(), "reminderId": reminder_id},
-            )
+            conversation_fields: dict[str, Any] = {
+                "tenantId": payload.get("tenantId"),
+                "userId": "system",
+                "userName": "George",
+                "role": "system",
+                "direction": "outbound",
+                "input": {"type": "reminder", "text": None, "transcript": None},
+                "output": {"text": text},
+                "trace": {"correlationId": new_id(), "reminderId": reminder_id},
+            }
+            if report_result is not None:
+                conversation_fields["llm"] = {
+                    "provider": "anthropic",
+                    "model": settings.anthropic_model,
+                    "inputTokens": report_result.input_tokens,
+                    "outputTokens": report_result.output_tokens,
+                    "cacheReadTokens": 0,
+                    "cacheCreationTokens": 0,
+                    "turns": report_result.turns,
+                    "stopReason": report_result.stop_reason,
+                    "latencyMs": round(report_result.latency_ms, 1),
+                    "costUsd": round(estimate_cost_usd(report_result.input_tokens, report_result.output_tokens), 6),
+                }
+                conversation_fields["toolCalls"] = report_result.tool_calls
+            conversations_repo.create_conversation(chat_id, **conversation_fields)
         except Exception:
             logger.exception("reminder_worker: failed sending reminder %s to chat %s", reminder_id, chat_id)
             ok = False

@@ -247,13 +247,134 @@ def test_tenant_scoped_tool_rejects_missing_tenant_even_with_allowed_role():
     assert "negocio" in result.lower()
 
 
-@pytest.mark.parametrize("tool_name", ["search_clients", "search_finance", "list_reminders", "list_pqrs"])
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "search_clients",
+        "search_finance",
+        "list_reminders",
+        "list_pqrs",
+        "list_record_types",
+        "search_records",
+        "summarize_records",
+    ],
+)
 def test_various_tenant_scoped_reads_reject_missing_tenant(tool_name):
     ctx = make_ctx("owner", tenant_id=None)
     input_ = {"query": "x"} if tool_name == "search_clients" else {}
     result, is_error = registry.dispatch(tool_name, input_, ctx)
     assert is_error is True
     assert "negocio" in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# records — owner-defined record types
+# ---------------------------------------------------------------------------
+def test_define_record_type_denied_for_admin():
+    result, is_error = registry.dispatch(
+        "define_record_type",
+        {"name": "Stock", "mode": "snapshot", "fields": [{"key": "cantidad", "type": "number"}], "measure_field": "cantidad"},
+        make_ctx("admin"),
+    )
+    assert is_error is True
+    assert "rol" in result.lower()
+
+
+def test_define_record_type_permitted_role_passes_gate_before_hitting_cosmos():
+    result, is_error = registry.dispatch(
+        "define_record_type",
+        {"name": "Stock", "mode": "snapshot", "fields": [{"key": "cantidad", "type": "number"}], "measure_field": "cantidad"},
+        make_ctx("owner"),
+    )
+    assert is_error is True
+    assert "rol" not in result.lower()
+
+
+def test_define_record_type_rejects_invalid_definition_before_hitting_cosmos():
+    result, is_error = registry.dispatch(
+        "define_record_type",
+        {"name": "Stock", "mode": "weekly", "fields": [{"key": "cantidad", "type": "number"}], "measure_field": "cantidad"},
+        make_ctx("owner"),
+    )
+    assert is_error is True
+    assert "mode" in result.lower()
+
+
+def test_list_record_types_denied_for_viewer():
+    result, is_error = registry.dispatch("list_record_types", {}, make_ctx("viewer"))
+    assert is_error is True
+    assert "rol" in result.lower()
+
+
+def test_list_record_types_permitted_role_passes_gate_before_hitting_cosmos():
+    result, is_error = registry.dispatch("list_record_types", {}, make_ctx("walker"))
+    assert is_error is True
+    assert "rol" not in result.lower()
+
+
+def test_log_record_denied_for_viewer():
+    result, is_error = registry.dispatch(
+        "log_record", {"type_key": "stock", "values": {"cantidad": 1}}, make_ctx("viewer")
+    )
+    assert is_error is True
+    assert "rol" in result.lower()
+
+
+def test_log_record_permitted_role_passes_gate_before_hitting_cosmos():
+    result, is_error = registry.dispatch(
+        "log_record", {"type_key": "stock", "values": {"cantidad": 1}}, make_ctx("walker")
+    )
+    assert is_error is True
+    assert "rol" not in result.lower()
+
+
+def test_search_records_denied_for_viewer():
+    result, is_error = registry.dispatch("search_records", {}, make_ctx("viewer"))
+    assert is_error is True
+    assert "rol" in result.lower()
+
+
+def test_search_records_permitted_role_passes_gate_before_hitting_cosmos():
+    result, is_error = registry.dispatch("search_records", {}, make_ctx("walker"))
+    assert is_error is True
+    assert "rol" not in result.lower()
+
+
+def test_summarize_records_denied_for_viewer():
+    result, is_error = registry.dispatch("summarize_records", {"type_key": "stock"}, make_ctx("viewer"))
+    assert is_error is True
+    assert "rol" in result.lower()
+
+
+def test_summarize_records_permitted_role_passes_gate_before_hitting_cosmos():
+    result, is_error = registry.dispatch("summarize_records", {"type_key": "stock"}, make_ctx("walker"))
+    assert is_error is True
+    assert "rol" not in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# registry.dispatch / anthropic_tool_defs — `only` allowlist (used to
+# restrict scheduled kind='report' reminders to read-only record tools)
+# ---------------------------------------------------------------------------
+def test_dispatch_rejects_tool_outside_allowlist():
+    result, is_error = registry.dispatch(
+        "define_record_type", {}, make_ctx("owner"), only=("search_records", "summarize_records")
+    )
+    assert is_error is True
+    assert "no disponible" in result.lower()
+
+
+def test_dispatch_allows_tool_within_allowlist():
+    result, is_error = registry.dispatch(
+        "search_records", {}, make_ctx("owner"), only=("search_records", "summarize_records")
+    )
+    assert is_error is True
+    assert "no disponible" not in result.lower()
+
+
+def test_anthropic_tool_defs_only_restricts_surface():
+    defs = registry.anthropic_tool_defs(only=("search_records", "summarize_records"))
+    assert {d["name"] for d in defs} == {"search_records", "summarize_records"}
 
 
 def test_create_tenant_is_platform_admin_only():

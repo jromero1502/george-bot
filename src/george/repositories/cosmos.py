@@ -25,6 +25,7 @@ CONTAINER_NAMES = (
     "reminders",
     "pqrs",
     "platformConfig",
+    "records",
 )
 
 

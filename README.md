@@ -12,7 +12,7 @@ Cosmos DB (serverless).
 ```
 Telegram --HTTP--> telegram_webhook --queue--> process_update --> Cosmos DB
                      (valida y encola)         (resuelve tenant,   (tenants, chats, clients,
-                                                 agente Haiku +      finance, reminders,
+                                                 agente Haiku +      finance, records, reminders,
                                                  tools + Groq STT)   pqrs, conversations,
                                                                      platformConfig)
 
@@ -71,6 +71,18 @@ de perros (`category: "dog"`, `attributes: {breed: "Beagle"}`) como a un taller 
 system prompt de George se arma dinámicamente a partir de `tenants.businessType`/`description`
 para que la conversación se sienta específica de cada negocio sin necesitar código distinto
 por rubro.
+
+Además, cada negocio puede declarar sus propios **tipos de registro** para llevar en el tiempo lo
+que su rubro necesite y que no es ni un cliente/item, ni un movimiento financiero, ni un PQR —
+stock, asistencia, ventas del día, mantenimientos, lo que corresponda. El owner los define
+conversando con George (`define_record_type`: nombre, campos tipados, si tienen un valor actual
+que se reemplaza o son eventos que se acumulan, y por qué agruparlos); el equipo carga datos con
+`log_record` y consulta el histórico o el estado actual con `search_records`/`summarize_records`.
+George detecta proactivamente cuándo el owner está describiendo esta necesidad y le propone
+definir la estructura antes de asumir nada. Un reporte también puede salir solo: un recordatorio
+`kind="report"` corre el agente con acceso de solo lectura a los registros y manda el resultado
+armado con datos reales, sin poder escribir nada. Ver `CLAUDE.md` para el detalle del modelo de
+datos (`records`, particionado por `/tenantId`).
 
 Ver `infra/` para el detalle de la infraestructura (Bicep) y `CLAUDE.md` para las decisiones de
 arquitectura.
@@ -225,8 +237,8 @@ sin `--demo-tenant-*`); los negocios reales se crean conversando con George como
 
 ## Esquema de datos
 
-Ver la sección "Esquema de datos" de `CLAUDE.md` para el detalle completo de las 8
-colecciones de Cosmos DB (`tenants`, `chats`, `conversations`, `clients`, `finance`,
+Ver la sección "Esquema de datos" de `CLAUDE.md` para el detalle completo de las 9
+colecciones de Cosmos DB (`tenants`, `chats`, `conversations`, `clients`, `finance`, `records`,
 `reminders`, `pqrs`, `platformConfig`) — todas con un campo `custom: {}` libre para extender
 sin migraciones.
 

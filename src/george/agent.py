@@ -22,6 +22,12 @@ logger = logging.getLogger("george.agent")
 # Safety cap — stop looping even if the model keeps requesting tools forever.
 MAX_TOOL_TURNS = 8
 
+# kind='report' reminders (function_app.py::reminder_worker) run through
+# generate_report_message below with ONLY these tools available — a scheduled
+# report must never be able to write anything, even though it runs with
+# ctx.role='owner' to be able to read every record type.
+_REPORT_TOOL_NAMES = ("list_record_types", "search_records", "summarize_records")
+
 
 def _reminder_system_prompt(tenant: Optional[dict[str, Any]]) -> str:
     tenant = tenant or {}
@@ -57,16 +63,27 @@ def _get_client() -> anthropic.Anthropic:
     return _client
 
 
-def run_agent(ctx: ToolContext, history: list[dict[str, Any]], user_message: str) -> AgentResult:
+def run_agent(
+    ctx: ToolContext,
+    history: list[dict[str, Any]],
+    user_message: str,
+    tool_names: Optional[tuple[str, ...]] = None,
+    system_prompt: Optional[str] = None,
+) -> AgentResult:
     """Runs the tool-use loop for one user turn: call Haiku, execute any
     tool_use blocks via the registry, feed the results back, and repeat
     until the model produces a final (`end_turn`) response or MAX_TOOL_TURNS
     is hit. `history` is prior turns as Anthropic message dicts (see
     repositories/conversations.py), oldest first.
+
+    `tool_names` restricts the tool surface to that allowlist (see
+    generate_report_message) and `system_prompt` overrides the normal
+    per-tenant/per-role prompt from build_system_prompt — both default to the
+    regular chat behavior when omitted.
     """
     client = _get_client()
-    system_prompt = build_system_prompt(ctx)
-    tools = registry.anthropic_tool_defs()
+    system_prompt = system_prompt or build_system_prompt(ctx)
+    tools = registry.anthropic_tool_defs(only=tool_names)
 
     messages: list[dict[str, Any]] = [*history, {"role": "user", "content": user_message}]
 
@@ -99,7 +116,7 @@ def run_agent(ctx: ToolContext, history: list[dict[str, Any]], user_message: str
             if block.type != "tool_use":
                 continue
             call_start = time.monotonic()
-            result_text, is_error = registry.dispatch(block.name, block.input, ctx)
+            result_text, is_error = registry.dispatch(block.name, block.input, ctx, only=tool_names)
             call_latency_ms = (time.monotonic() - call_start) * 1000
             tool_calls.append(
                 {
@@ -176,3 +193,29 @@ def generate_reminder_message(instruction: str, tenant: Optional[dict[str, Any]]
     )
     text = next((b.text for b in response.content if b.type == "text"), "").strip()
     return text or instruction
+
+
+def _report_system_prompt(tenant: Optional[dict[str, Any]]) -> str:
+    tenant = tenant or {}
+    business_name = tenant.get("name") or "este negocio"
+    business_type = tenant.get("businessType") or ""
+    business_line = f"'{business_name}'" + (f" ({business_type})" if business_type else "")
+    return (
+        f"Eres George, el asistente del negocio {business_line}. Vas a redactar un reporte breve para Telegram "
+        "siguiendo la instruccion que recibas, basandote EXCLUSIVAMENTE en datos reales que obtengas llamando a "
+        "list_record_types, search_records y/o summarize_records — nunca inventes numeros. Si la instruccion "
+        "menciona un tipo de registro que no existe en este negocio, decilo en vez de inventar datos. "
+        "Responde unicamente con el texto final del reporte, sin comillas ni explicaciones sobre lo que hiciste."
+    )
+
+
+def generate_report_message(instruction: str, ctx: ToolContext) -> AgentResult:
+    """Tool-use generation for kind='report' reminders (function_app.py::
+    reminder_worker). Runs the same loop as run_agent but restricted to
+    _REPORT_TOOL_NAMES — a scheduled report must never be able to write
+    anything, even though `ctx.role` here is 'owner' so it can read every
+    record type. Returns the full AgentResult (not just the text) so the
+    caller can audit it in `conversations` like any other turn."""
+    return run_agent(
+        ctx, [], instruction, tool_names=_REPORT_TOOL_NAMES, system_prompt=_report_system_prompt(ctx.tenant)
+    )

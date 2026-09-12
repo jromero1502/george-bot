@@ -35,6 +35,11 @@ class ToolContext:
     # whatever) here, but is_platform_admin stays True so switch_to_platform_admin
     # can find its way back (see tools/membership.py).
     is_platform_admin: bool = False
+    # Active record-type definitions (repositories/records.py) for the active
+    # tenant, loaded once per message alongside `tenant` — lets prompts.py show
+    # George which custom record types this business already has without
+    # spending a tool call on list_record_types every turn.
+    record_types: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)

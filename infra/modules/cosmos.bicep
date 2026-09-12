@@ -295,6 +295,59 @@ resource pqrsContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/conta
   }
 }
 
+// Owner-defined record types (definitions and the records logged against
+// them) — a docType discriminator tells them apart within the same
+// partition instead of splitting into two containers, since both are small,
+// tenant-scoped, and always queried together conceptually (see
+// george/repositories/records.py).
+resource recordsContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-08-15' = {
+  parent: database
+  name: 'records'
+  properties: {
+    resource: {
+      id: 'records'
+      partitionKey: {
+        paths: [
+          '/tenantId'
+        ]
+        kind: 'Hash'
+      }
+      indexingPolicy: union(defaultIndexingPolicy, {
+        compositeIndexes: [
+          [
+            {
+              path: '/tenantId'
+              order: 'ascending'
+            }
+            {
+              path: '/typeKey'
+              order: 'ascending'
+            }
+            {
+              path: '/occurredAt'
+              order: 'descending'
+            }
+          ]
+          [
+            {
+              path: '/tenantId'
+              order: 'ascending'
+            }
+            {
+              path: '/docType'
+              order: 'ascending'
+            }
+            {
+              path: '/createdAt'
+              order: 'descending'
+            }
+          ]
+        ]
+      })
+    }
+  }
+}
+
 // Platform-level, admin-managed settings — currently a single document (the
 // default reminder templates create_tenant seeds onto every new business).
 // Kept separate from `tenants` so that container stays "one document per

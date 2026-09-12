@@ -213,6 +213,15 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
     job fallido (línea "subject claim - ...") y usar ESE valor literal en
     `az ad app federated-credential update`. Si el repo se transfiere o se borra/recrea, el id
     numérico cambia y hay que repetir el mismo diagnóstico.
+  - **`telegramWebhookPath` debe cargarse como GitHub *variable*, no como *secret*.** GitHub
+    Actions enmascara automáticamente cualquier output de job que contenga, como substring, el
+    valor de un secret registrado — y el output `telegramWebhookUrl` de `main.bicep`
+    (`https://.../api/telegram/<path>`) lo contiene literalmente. Cargarlo como secret hace que
+    Actions descarte ese output en silencio (`Skip output 'telegramWebhookUrl' since it may
+    contain secret`, sin fallar el job), y el siguiente job que lo consume (`post-deploy`, para
+    armar la URL del webhook) recibe un string vacío. Coherente con que el propio Bicep ya lo
+    trata como no-secreto (ver la nota de `telegramWebhookPath` no `@secure()` más abajo): va en
+    `vars`, no en `secrets`, del environment `production`.
 - **`main` tiene DOS mecanismos de protección independientes que hay que mirar por separado:**
   la branch protection clásica (`branches/main/protection`, la que gestiona este repo vía API)
   y un **ruleset** (`rs-master`, Settings → Rules), que GitHub sugiere/crea solo al crear un

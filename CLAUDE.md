@@ -204,6 +204,24 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
   cuatro jobs que tocan Azure/secretos (`infra`, `publish`, `post-deploy`, y el fetch de
   outputs cuando `infra` se salta). Ese mismo environment tiene un required reviewer: el deploy
   real queda pausado hasta aprobarlo a mano en la pestaña Actions.
+- **`main` tiene DOS mecanismos de protección independientes que hay que mirar por separado:**
+  la branch protection clásica (`branches/main/protection`, la que gestiona este repo vía API)
+  y un **ruleset** (`rs-master`, Settings → Rules), que GitHub sugiere/crea solo al crear un
+  repo público y que este repo ya tenía desde antes de este pipeline. Son independientes: pasar
+  la clásica no alcanza si el ruleset bloquea, y viceversa. Dos gotchas reales que salieron acá:
+  1. El ruleset pedía `required_approving_review_count: 1` — pero **GitHub nunca deja que el
+     autor de un PR apruebe su propio PR**, sin excepción y sin ningún setting que lo habilite.
+     En un repo de un solo mantenedor eso es un review que no se puede cumplir nunca por la vía
+     normal. Se bajó a `0` en el ruleset (junto con `require_code_owner_review: false`, ya que
+     no hay `CODEOWNERS`).
+  2. El ruleset traía una regla `update` ("Restrict updates") con `bypass_actors: []` —
+     bloqueaba **cualquier** actualización de `main` (merge de PR incluido) para **cualquiera**,
+     sin relación con el review. `current_user_can_bypass` en la respuesta de
+     `GET .../rulesets/{id}` es la señal a mirar: si dice `"never"`, ni admins pueden pasar. Se
+     agregó `bypass_actors: [{"actor_type": "RepositoryRole", "actor_id": 5, "bypass_mode":
+     "always"}]` (rol `admin`) para que el dueño del repo pueda mergear. `gh pr merge --admin`
+     sigue haciendo falta además por la branch protection clásica (que también exige 1 review,
+     bypasseable por admins porque `enforce_admins: false`).
 - **`deploy.yml` NO reusa `infra/deploy.ps1` tal cual.** La línea que reescribe `$env:Path`
   desde el registro de Windows (para que `func`/`azurite` recién instalados aparezcan en el
   PATH de una sesión ya abierta) es Windows-only y rompería un runner `ubuntu-latest`. El

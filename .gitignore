@@ -1,0 +1,33 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Azure Functions
+src/local.settings.json
+src/bin/
+src/obj/
+.python_packages/
+
+# Local dev infra
+.azurite/
+
+# Secrets / params with real values
+infra/main.parameters.local.json
+
+# OS / editor
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Claude Code local state
+.claude/
+
+# Build artifacts if a zip-deploy path is ever used instead of func publish
+*.zip

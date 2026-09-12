@@ -1,0 +1,238 @@
+name: deploy
+
+# Runs after ci.yml's checks pass on main (branch protection requires them).
+# infra/** only redeploys Bicep when it actually changed — see CLAUDE.md:
+# functionapp.bicep declares appSettings as a full list, so every
+# `az deployment sub create` briefly wipes WEBSITE_RUN_FROM_PACKAGE until the
+# publish job below puts it back. Skipping infra on code-only merges avoids
+# that window entirely; publish always runs so the app is never left stale.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force_infra:
+        description: "Redeploy infra/main.bicep even if infra/** didn't change"
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # required by azure/login's OIDC federated credential
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      infra: ${{ steps.check.outputs.infra }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: check
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "infra=${{ github.event.inputs.force_infra }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          before="${{ github.event.before }}"
+          # All-zeros before = new branch; missing/unknown before = shallow
+          # history or a force-push we can't diff safely. Either way, don't
+          # guess — deploy infra so it's never silently out of sync.
+          if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$before" 2>/dev/null; then
+            echo "infra=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --name-only "$before" "${{ github.sha }}" -- infra/ | grep -q .; then
+            echo "infra=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "infra=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Deploys infra/main.bicep only when needed, then always reads back the
+  # subscription-deployment outputs (functionAppName is not knowable ahead
+  # of time — it's derived from uniqueString(resourceGroup().id)) so
+  # downstream jobs have them regardless of whether this run deployed.
+  infra:
+    needs: changes
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      functionAppName: ${{ steps.outputs.outputs.functionAppName }}
+      functionAppHostName: ${{ steps.outputs.outputs.functionAppHostName }}
+      telegramWebhookUrl: ${{ steps.outputs.outputs.telegramWebhookUrl }}
+      cosmosEndpoint: ${{ steps.outputs.outputs.cosmosEndpoint }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy infra/main.bicep
+        if: needs.changes.outputs.infra == 'true'
+        run: |
+          set -euo pipefail
+          # infra/main.parameters.json ships with REPLACE_ME placeholders —
+          # it is not used here. Refuse to deploy if any required secret
+          # came through empty rather than silently writing a blank value.
+          for name in TELEGRAM_BOT_TOKEN TELEGRAM_WEBHOOK_SECRET TELEGRAM_WEBHOOK_PATH ANTHROPIC_API_KEY GROQ_API_KEY PLATFORM_ADMIN_CHAT_ID; do
+            value="${!name}"
+            if [ -z "$value" ]; then
+              echo "::error::Secret $name is empty — refusing to deploy."
+              exit 1
+            fi
+          done
+          # Deployment name mirrors infra/deploy.ps1's "deploy-$ResourceGroup"
+          # convention — subscription deployment names are unique per
+          # subscription and pin to the region of their first use.
+          az deployment sub create \
+            --name "deploy-${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --location "${{ vars.AZURE_LOCATION }}" \
+            --template-file infra/main.bicep \
+            --parameters \
+              resourceGroupName="${{ vars.AZURE_RESOURCE_GROUP }}" \
+              location="${{ vars.AZURE_LOCATION }}" \
+              appName="${{ vars.APP_NAME }}" \
+              environmentName="${{ vars.ENVIRONMENT_NAME }}" \
+              telegramBotToken="$TELEGRAM_BOT_TOKEN" \
+              telegramWebhookSecret="$TELEGRAM_WEBHOOK_SECRET" \
+              telegramWebhookPath="$TELEGRAM_WEBHOOK_PATH" \
+              anthropicApiKey="$ANTHROPIC_API_KEY" \
+              groqApiKey="$GROQ_API_KEY" \
+              platformAdminChatId="$PLATFORM_ADMIN_CHAT_ID" \
+              anthropicModel="${{ vars.ANTHROPIC_MODEL }}" \
+              defaultTimezone="${{ vars.DEFAULT_TIMEZONE }}" \
+              historyTurns="${{ vars.HISTORY_TURNS }}" \
+              dryRun="${{ vars.DRY_RUN }}" \
+              deployerPrincipalId="${{ vars.AZURE_DEPLOYER_PRINCIPAL_ID }}"
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+          TELEGRAM_WEBHOOK_PATH: ${{ secrets.TELEGRAM_WEBHOOK_PATH }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          PLATFORM_ADMIN_CHAT_ID: ${{ secrets.PLATFORM_ADMIN_CHAT_ID }}
+
+      - name: Skip infra (infra/** unchanged)
+        if: needs.changes.outputs.infra != 'true'
+        run: echo "No changes under infra/ — reusing the existing deployment."
+
+      - name: Resolve deployment outputs
+        id: outputs
+        run: |
+          set -euo pipefail
+          outputs=$(az deployment sub show \
+            --name "deploy-${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --query "properties.outputs" -o json)
+          echo "functionAppName=$(jq -r '.functionAppName.value' <<< "$outputs")" >> "$GITHUB_OUTPUT"
+          echo "functionAppHostName=$(jq -r '.functionAppHostName.value' <<< "$outputs")" >> "$GITHUB_OUTPUT"
+          echo "telegramWebhookUrl=$(jq -r '.telegramWebhookUrl.value' <<< "$outputs")" >> "$GITHUB_OUTPUT"
+          echo "cosmosEndpoint=$(jq -r '.cosmosEndpoint.value' <<< "$outputs")" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: infra
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Replaces `func azure functionapp publish --python` from deploy.ps1
+      # (that script rewrites $env:Path from the Windows registry, so it
+      # isn't portable to a Linux runner). scm-do-build-during-deployment /
+      # enable-oryx-build reproduce the remote build Core Tools does under
+      # the hood — functionapp.bicep sets neither app setting itself.
+      - uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ needs.infra.outputs.functionAppName }}
+          package: src
+          scm-do-build-during-deployment: true
+          enable-oryx-build: true
+
+  post-deploy:
+    needs: [infra, publish]
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Idempotent: create_*_if_not_exists containers, set_platform_admin
+      # merges into the existing chat doc without touching its memberships,
+      # default_reminders is only seeded if missing. NEVER pass
+      # --demo-tenant-owner-chat-id / --second-tenant-role-for-owner here —
+      # those create demo businesses, which has no place in production.
+      - name: Seed Cosmos DB (platform_admin + containers)
+        run: |
+          pip install -r src/requirements.txt
+          python scripts/seed_cosmos.py \
+            --endpoint "${{ needs.infra.outputs.cosmosEndpoint }}" \
+            --platform-admin-chat-id "$PLATFORM_ADMIN_CHAT_ID"
+        env:
+          PLATFORM_ADMIN_CHAT_ID: ${{ secrets.PLATFORM_ADMIN_CHAT_ID }}
+
+      # set_webhook.ps1 is pure PowerShell + Invoke-RestMethod, so it runs
+      # fine under pwsh on ubuntu-latest. Re-registering on every deploy is
+      # idempotent and self-heals if the function key ever rotated.
+      - name: Register Telegram webhook
+        shell: pwsh
+        run: |
+          $key = az functionapp keys list `
+            -g "${{ vars.AZURE_RESOURCE_GROUP }}" `
+            -n "${{ needs.infra.outputs.functionAppName }}" `
+            --query functionKeys.default -o tsv
+          if (-not $key) { throw "Could not read the function key" }
+          ./scripts/set_webhook.ps1 `
+            -BotToken $env:TELEGRAM_BOT_TOKEN `
+            -FunctionAppUrl "${{ needs.infra.outputs.telegramWebhookUrl }}" `
+            -FunctionKey $key `
+            -Secret $env:TELEGRAM_WEBHOOK_SECRET
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+
+      # GET /api/health is AuthLevel.ANONYMOUS and checks Cosmos connectivity
+      # — a free end-to-end smoke test with no function key needed.
+      - name: Smoke test /api/health
+        run: |
+          set -e
+          url="https://${{ needs.infra.outputs.functionAppHostName }}/api/health"
+          for i in $(seq 1 18); do
+            code=$(curl -s -o /tmp/health.json -w "%{http_code}" "$url" || echo "000")
+            if [ "$code" = "200" ]; then
+              echo "health check OK:"
+              cat /tmp/health.json
+              exit 0
+            fi
+            echo "attempt $i/18: got HTTP $code, retrying in 5s..."
+            sleep 5
+          done
+          echo "::error::$url never returned 200"
+          cat /tmp/health.json 2>/dev/null || true
+          exit 1

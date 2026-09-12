@@ -1,0 +1,25 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+
+    "COSMOS_ENDPOINT": "https://localhost:8081",
+    "COSMOS_DATABASE": "george",
+    "COSMOS_KEY": "C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==",
+
+    "TELEGRAM_BOT_TOKEN": "123456:local-fake-token",
+    "TELEGRAM_WEBHOOK_SECRET": "local-dev-secret",
+    "TELEGRAM_WEBHOOK_PATH": "local-dev-path",
+
+    "ANTHROPIC_API_KEY": "sk-ant-REPLACE_ME",
+    "GROQ_API_KEY": "gsk-REPLACE_ME",
+    "ANTHROPIC_MODEL": "claude-haiku-4-5",
+
+    "DEFAULT_TIMEZONE": "America/Bogota",
+    "PLATFORM_ADMIN_CHAT_ID": "111111111",
+    "HISTORY_TURNS": "12",
+
+    "DRY_RUN": "true"
+  }
+}

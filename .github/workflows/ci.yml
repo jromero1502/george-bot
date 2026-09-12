@@ -1,0 +1,49 @@
+name: ci
+
+# Gate for every PR into main, and a sanity re-check on main itself.
+# Deliberately carries no secrets and no `id-token: write` — this repo is
+# public and `pull_request` can come from a fork, so a forked PR must never
+# be able to touch Azure or any credential. See deploy.yml for the
+# credentialed, environment-gated pipeline that runs after merge.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned to 3.11 to match infra/modules/functionapp.bicep's
+      # linuxFxVersion: 'Python|3.11' — the deployed runtime.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            src/requirements.txt
+            requirements-dev.txt
+
+      - run: pip install -r src/requirements.txt -r requirements-dev.txt
+
+      # tests/conftest.py inserts src/ onto sys.path and stubs every env var
+      # george.config.settings requires at import time — no Cosmos emulator,
+      # no Azurite, no network needed. Must run from the repo root so that
+      # relative path resolves.
+      - run: pytest tests/ -v
+
+  bicep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: az bicep install
+      - name: Build (catches syntax/type errors, resolves all modules)
+        run: az bicep build --file infra/main.bicep --stdout > /dev/null
+      - name: Lint
+        run: az bicep lint --file infra/main.bicep

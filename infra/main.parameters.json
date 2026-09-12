@@ -1,0 +1,45 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "appName": {
+      "value": "george"
+    },
+    "environmentName": {
+      "value": "prod"
+    },
+    "location": {
+      "value": "eastus2"
+    },
+    "telegramBotToken": {
+      "value": "REPLACE_ME"
+    },
+    "telegramWebhookSecret": {
+      "value": "REPLACE_ME"
+    },
+    "telegramWebhookPath": {
+      "value": "REPLACE_ME"
+    },
+    "anthropicApiKey": {
+      "value": "REPLACE_ME"
+    },
+    "groqApiKey": {
+      "value": "REPLACE_ME"
+    },
+    "platformAdminChatId": {
+      "value": "REPLACE_ME"
+    },
+    "anthropicModel": {
+      "value": "claude-haiku-4-5"
+    },
+    "defaultTimezone": {
+      "value": "America/Bogota"
+    },
+    "historyTurns": {
+      "value": 12
+    },
+    "dryRun": {
+      "value": false
+    }
+  }
+}

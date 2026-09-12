@@ -1,0 +1,22 @@
+# Versions pinned exactly (not just floors) so CI and the deployed Function
+# App build the same dependency graph every time — see CLAUDE.md / CI notes.
+# Bump deliberately by editing this file, not by letting `pip install` drift.
+
+# Azure Functions Python worker
+azure-functions==2.3.0
+
+# Cosmos DB SQL API client + managed identity auth
+azure-cosmos==4.17.0
+azure-identity==1.25.3
+azure-core==1.41.0
+
+# Anthropic (Claude Haiku) and Groq (Whisper) — Groq is called via raw HTTP (httpx),
+# it has no first-party Python SDK dependency here.
+anthropic==1.5.0
+httpx==0.28.1
+
+# Cron -> next-run-at calculation for reminders
+croniter==6.2.4
+
+# zoneinfo (stdlib) needs the IANA tz database on minimal Linux containers
+tzdata==2026.3

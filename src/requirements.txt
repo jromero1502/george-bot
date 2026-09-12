@@ -3,7 +3,7 @@
 # Bump deliberately by editing this file, not by letting `pip install` drift.
 
 # Azure Functions Python worker
-azure-functions==2.3.0
+azure-functions==1.25.0
 
 # Cosmos DB SQL API client + managed identity auth
 azure-cosmos==4.17.0

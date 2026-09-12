@@ -240,11 +240,26 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
      "always"}]` (rol `admin`) para que el dueño del repo pueda mergear. `gh pr merge --admin`
      sigue haciendo falta además por la branch protection clásica (que también exige 1 review,
      bypasseable por admins porque `enforce_admins: false`).
-- **`deploy.yml` NO reusa `infra/deploy.ps1` tal cual.** La línea que reescribe `$env:Path`
-  desde el registro de Windows (para que `func`/`azurite` recién instalados aparezcan en el
-  PATH de una sesión ya abierta) es Windows-only y rompería un runner `ubuntu-latest`. El
-  workflow llama `az deployment sub create` y `Azure/functions-action` directo;
-  `infra/deploy.ps1` queda como el camino de despliegue manual/local únicamente.
+- **`deploy.yml` NO reusa `infra/deploy.ps1` tal cual, pero el job `publish` sí termina
+  llamando el mismo `func azure functionapp publish --python`** (instala Core Tools con
+  `npm install -g azure-functions-core-tools@4` primero — la línea de `deploy.ps1` que reescribe
+  `$env:Path` desde el registro de Windows es Windows-only e innecesaria en un runner Linux,
+  `npm install -g` ya deja `func` en el PATH). El job `infra` sigue llamando
+  `az deployment sub create` directo (no hay equivalente Core Tools para eso).
+  - **`Azure/functions-action@v1` (la Action "oficial" de Marketplace) NO sirve para este
+    setup y se sacó del workflow tras romper producción en el primer deploy real.** Para Linux
+    Consumption + auth RBAC/OIDC (exactamente nuestro caso), el código de la action
+    (`derivePublishMethod` en `contentPreparer.ts`) elige incondicionalmente
+    `WebsiteRunFromPackageDeploy`: sube el zip crudo a blob storage y apunta
+    `WEBSITE_RUN_FROM_PACKAGE` ahí, **sin ningún paso de build** — ignora en silencio
+    `scm-do-build-during-deployment`/`enable-oryx-build`/`remote-build` para esa combinación
+    específica de SKU+auth (esos inputs sí hacen algo con `publish-profile` o en Flex
+    Consumption, pero no acá). Resultado real: el deploy reportó éxito, pero el paquete no
+    tenía ninguna dependencia instalada — el worker de Python nunca arrancó, la app quedó en
+    estado `Running` pero con **cero funciones registradas**, y `/api/health` daba 404. `func
+    azure functionapp publish` sí arma un paquete autocontenido (o dispara el build remoto vía
+    Kudu correctamente) y de paso reusa la sesión de `az login` que ya dejó `azure/login@v2`,
+    sin necesitar publish profile.
 - **`infra` (el job de Bicep) solo corre si el diff toca `infra/**`, no en cada merge.**
   `functionapp.bicep` declara `siteConfig.appSettings` como una lista completa (no un merge),
   así que cualquier `az deployment sub create` reescribe `WEBSITE_RUN_FROM_PACKAGE` — la app

@@ -83,13 +83,17 @@ jobs:
           # infra/main.parameters.json ships with REPLACE_ME placeholders —
           # it is not used here. Refuse to deploy if any required secret
           # came through empty rather than silently writing a blank value.
-          for name in TELEGRAM_BOT_TOKEN TELEGRAM_WEBHOOK_SECRET TELEGRAM_WEBHOOK_PATH ANTHROPIC_API_KEY GROQ_API_KEY PLATFORM_ADMIN_CHAT_ID; do
+          for name in TELEGRAM_BOT_TOKEN TELEGRAM_WEBHOOK_SECRET ANTHROPIC_API_KEY GROQ_API_KEY PLATFORM_ADMIN_CHAT_ID; do
             value="${!name}"
             if [ -z "$value" ]; then
               echo "::error::Secret $name is empty — refusing to deploy."
               exit 1
             fi
           done
+          if [ -z "${{ vars.TELEGRAM_WEBHOOK_PATH }}" ]; then
+            echo "::error::Variable TELEGRAM_WEBHOOK_PATH is empty — refusing to deploy."
+            exit 1
+          fi
           # Deployment name mirrors infra/deploy.ps1's "deploy-$ResourceGroup"
           # convention — subscription deployment names are unique per
           # subscription and pin to the region of their first use.
@@ -104,7 +108,7 @@ jobs:
               environmentName="${{ vars.ENVIRONMENT_NAME }}" \
               telegramBotToken="$TELEGRAM_BOT_TOKEN" \
               telegramWebhookSecret="$TELEGRAM_WEBHOOK_SECRET" \
-              telegramWebhookPath="$TELEGRAM_WEBHOOK_PATH" \
+              telegramWebhookPath="${{ vars.TELEGRAM_WEBHOOK_PATH }}" \
               anthropicApiKey="$ANTHROPIC_API_KEY" \
               groqApiKey="$GROQ_API_KEY" \
               platformAdminChatId="$PLATFORM_ADMIN_CHAT_ID" \
@@ -116,7 +120,6 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
-          TELEGRAM_WEBHOOK_PATH: ${{ secrets.TELEGRAM_WEBHOOK_PATH }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           PLATFORM_ADMIN_CHAT_ID: ${{ secrets.PLATFORM_ADMIN_CHAT_ID }}

@@ -165,6 +165,12 @@ puede tener errores menores de reconocimiento; usa el contexto de la conversaci�
 - Si este chat participa en más de un negocio, el usuario puede pedirte cambiar ("cambiemos al otro negocio", \
 "ahora hablemos de mi otro negocio") — en ese caso usa list_my_businesses para ver las opciones y switch_business \
 para fijar la nueva activa.{platform_admin_line}
+- Si el usuario te pide agregar, dar de alta, invitar o cambiar el rol de alguien en el equipo de este negocio \
+(ej. "agregá a X como admin", "sumá a este chat_id como walker"), usa upsert_chat con el chat_id exacto que te \
+dieron — nunca digas "listo, agregado" o "ya puede escribirte" sin haber llamado la herramienta en este mismo \
+turno y haber visto que devolvió éxito. Un alta nueva tampoco es instantánea para esa persona: recién puede \
+escribirte desde SU PROPIO mensaje siguiente, así que no lo afirmes como un hecho ya comprobado si todavía no te \
+escribió.
 - Nunca digas que ya registraste, guardaste, cobraste, eliminaste o cambiaste algo si no llamaste efectivamente \
 a la herramienta correspondiente en este mismo turno — si el usuario pide varias acciones a la vez, llamá una \
 herramienta por cada una antes de dar el resumen final. Si una herramienta devuelve un error, contá el error \

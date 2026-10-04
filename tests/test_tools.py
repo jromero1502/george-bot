@@ -259,6 +259,7 @@ def test_tenant_scoped_tool_rejects_missing_tenant_even_with_allowed_role():
         "summarize_records",
         "update_record",
         "delete_record",
+        "recall_chat_history",
     ],
 )
 def test_various_tenant_scoped_reads_reject_missing_tenant(tool_name):
@@ -564,3 +565,39 @@ def test_switch_to_platform_admin_is_noop_when_already_in_platform_mode():
     )
     assert is_error is False
     assert "ya estabas" in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# recall_chat_history — reading back a past day's raw conversation
+# ---------------------------------------------------------------------------
+def test_recall_chat_history_denied_for_walker():
+    result, is_error = registry.dispatch(
+        "recall_chat_history", {"since_date": "2026-09-29"}, make_ctx("walker")
+    )
+    assert is_error is True
+    assert "rol" in result.lower()
+
+
+def test_recall_chat_history_permitted_role_passes_gate_before_hitting_cosmos():
+    result, is_error = registry.dispatch(
+        "recall_chat_history", {"since_date": "2026-09-29"}, make_ctx("admin")
+    )
+    assert is_error is True
+    assert "rol" not in result.lower()
+
+
+def test_recall_chat_history_rejects_until_date_before_since_date():
+    ctx = make_ctx("owner")
+    result, is_error = registry.dispatch(
+        "recall_chat_history", {"since_date": "2026-09-29", "until_date": "2026-09-28"}, ctx
+    )
+    assert is_error is True
+    assert "anterior" in result.lower()
+
+
+def test_recall_chat_history_rejects_invalid_date_format():
+    result, is_error = registry.dispatch(
+        "recall_chat_history", {"since_date": "29-09-2026"}, make_ctx("owner")
+    )
+    assert is_error is True
+    assert "invalida" in result.lower()

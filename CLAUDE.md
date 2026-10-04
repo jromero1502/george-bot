@@ -36,6 +36,7 @@ src/
     tools/               Un módulo por dominio + registry.py que los agrega + tenants.py (platform_admin)
                          + membership.py (list_my_businesses/switch_business — gestión de la propia membership)
                          + records.py (tipos de registro propios del negocio — stock, asistencia, etc.)
+                         + history.py (recall_chat_history — releer mensajes reales de un día pasado)
     repositories/        Un módulo por contenedor de Cosmos + cosmos.py (factory de cliente) + tenants.py
 scripts/          seed_cosmos.py, simulate_update.py, set_webhook.ps1, local_up.ps1
 tests/            pytest — scheduling y gating de tools/tenant, sin dependencias externas
@@ -161,6 +162,23 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
   `run_agent` restringido (vía el nuevo `only=` en `registry.anthropic_tool_defs`/`dispatch`) a
   `list_record_types`/`search_records`/`summarize_records` — un reporte programado nunca puede
   escribir nada, aunque el rol con el que corre sí podría.
+- **`recall_chat_history` (`tools/history.py`) — releer un día pasado cuando el usuario pide
+  "recuperar" algo.** El historial automático que se le manda a Haiku en cada turno
+  (`function_app._history_to_messages`) es solo los últimos `HISTORY_TURNS` (12) turnos — en un
+  chat activo, una lista dictada hace unos días ya se salió de ahí aunque siga completa en
+  `conversations`. Caso real: George perdió ~14 de 18 ítems de una lista de supermercado porque
+  confirmaba "anotado" sin llamar `log_record` (ver la regla nueva en `prompts.py` sobre esto); la
+  única forma de recuperarlos es releer los mensajes reales de esa noche, no reconstruirlos de
+  memoria (que es probado-pobre: Haiku ya se equivocó dos veces tratando de recordar ese mismo día
+  sin releerlo). `recall_chat_history(since_date, until_date)` filtra por `/chatId` (partition key
+  de `conversations`) Y por `tenantId` — la única lectura de ese contenedor que SÍ filtra por
+  tenant (contraste con la nota de la tabla de esquema más abajo: para todo lo demás es metadato);
+  importa para un chat dual-tenant, que no debería ver la conversación de OTRO negocio solo porque
+  comparte `chatId`. Los límites del día se calculan en la zona horaria del negocio
+  (`ctx.tenant.timezone`), no UTC — "el martes" lo dice el usuario pensando en hora de Bogotá, y
+  una conversación que cruza la medianoche UTC (como la del supermercado, 23:40 a 00:31 UTC) debe
+  seguir cayendo en un solo día. Restringida a `owner`/`admin` (no `walker`) porque expone texto
+  crudo de la conversación, no datos ya curados.
 - **`PLATFORM_ADMIN_CHAT_ID`** (antes `OWNER_CHAT_ID`) es el chat que recibe alertas de la cola
   envenenada y el que se siembra con `isPlatformAdmin: true` — ya no es "el dueño del negocio",
   es el operador de toda la plataforma.
@@ -352,7 +370,7 @@ en ISO-8601 UTC.
 | `finance` | `/tenantId` | Un doc por movimiento (`charge\|payment\|expense`), `clientId`, `balance`, `status`, `currency` (heredada del tenant). `expense` es el único tipo sin cliente — `clientId`/`clientName` quedan `None` (ver nota abajo). |
 | `reminders` | `/id` (ver nota arriba) | `tenantId`, `schedule` (`cron`/`once`), `target` (`role`/`chat`), `nextRunAt` (UTC). |
 | `pqrs` | `/tenantId` | Peticiones/quejas/reclamos/sugerencias, `reportedBy`, `status`. |
-| `conversations` | `/chatId` | Auditoría por turno: tokens, costo, latencia, tool calls. `tenantId` como metadato (no se usa para filtrar, ya está implícito en `chatId`). |
+| `conversations` | `/chatId` | Auditoría por turno: tokens, costo, latencia, tool calls. `tenantId` es metadato para casi todo (ya está implícito en `chatId`) — la excepción es `recall_chat_history` (`tools/history.py`), que sí filtra por `tenantId` para no mezclar negocios en un chat dual-tenant. |
 | `platformConfig` | `/id` | Config de plataforma, gestionada por `platform_admin`. Un solo doc hoy (`id: "default_reminders"`): `templates[]` que `create_tenant` siembra en cada negocio nuevo (ver `get_default_reminder_templates`/`set_default_reminder_templates` en `tools/tenants.py`). No afecta negocios ya creados. |
 | `records` | `/tenantId` | Tipos de registro definidos por el owner (`docType: "type_definition"`, `id: "type::<typeKey>"`, `fields[]`, `mode`, `measureField`, `groupField`, `clientLink`) y los registros cargados contra ellos (`docType: "record"`, `values{}`, `amount`/`groupKey` denormalizados, `occurredAt`, `period`). Ver la nota sobre "Tipos de registro definidos por el owner" más arriba. |
 

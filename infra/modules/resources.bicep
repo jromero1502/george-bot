@@ -26,6 +26,10 @@ param anthropicApiKey string
 @secure()
 param groqApiKey string
 
+@description('Document Intelligence pricing tier for OCR on Telegram photos')
+@allowed(['S0', 'F0'])
+param documentIntelligenceSku string = 'S0'
+
 @description('Telegram chatId of the platform operator — seeded with role=platform_admin, receives poison-queue alerts, and is the only role that can create new tenants (businesses) via the create_tenant tool')
 param platformAdminChatId string
 
@@ -52,6 +56,7 @@ var storageAccountName = toLower('st${appName}${uniqueSuffix}')
 var cosmosAccountName = toLower('cosmos-${appName}-${environmentName}-${uniqueSuffix}')
 var functionAppName = toLower('func-${appName}-${environmentName}-${uniqueSuffix}')
 var appServicePlanName = toLower('plan-${appName}-${environmentName}')
+var documentIntelligenceAccountName = toLower('docint-${appName}-${environmentName}-${uniqueSuffix}')
 var databaseName = 'george'
 
 module storage 'storage.bicep' = {
@@ -73,6 +78,16 @@ module cosmos 'cosmos.bicep' = {
   }
 }
 
+module documentIntelligence 'documentintelligence.bicep' = {
+  name: 'documentIntelligence'
+  params: {
+    accountName: documentIntelligenceAccountName
+    location: location
+    tags: tags
+    skuName: documentIntelligenceSku
+  }
+}
+
 module functionApp 'functionapp.bicep' = {
   name: 'functionapp'
   params: {
@@ -88,6 +103,7 @@ module functionApp 'functionapp.bicep' = {
     telegramWebhookPath: telegramWebhookPath
     anthropicApiKey: anthropicApiKey
     groqApiKey: groqApiKey
+    documentIntelligenceEndpoint: documentIntelligence.outputs.endpoint
     anthropicModel: anthropicModel
     defaultTimezone: defaultTimezone
     platformAdminChatId: platformAdminChatId
@@ -131,6 +147,29 @@ resource cosmosDataAccessDeployer 'Microsoft.DocumentDB/databaseAccounts/sqlRole
   }
 }
 
+// Grants the Function App's system-assigned identity access to call the
+// Document Intelligence account (disableLocalAuth: true there too — RBAC is
+// the only way in). "Cognitive Services User" is the built-in role for
+// calling inference APIs (not just reading resource metadata).
+resource documentIntelligenceAccountRef 'Microsoft.CognitiveServices/accounts@2024-10-01' existing = {
+  name: documentIntelligenceAccountName
+  dependsOn: [
+    documentIntelligence
+  ]
+}
+
+var cognitiveServicesUserRoleId = 'a97b65f3-24c7-4388-baec-2e87135dc908'
+
+resource documentIntelligenceAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: documentIntelligenceAccountRef
+  name: guid(documentIntelligenceAccountRef.id, functionAppName, 'cognitive-services-user')
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', cognitiveServicesUserRoleId)
+    principalId: functionApp.outputs.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
 module diagnostics 'diagnostics.bicep' = {
   name: 'diagnostics'
   params: {
@@ -144,5 +183,6 @@ output functionAppName string = functionApp.outputs.functionAppName
 output functionAppHostName string = functionApp.outputs.defaultHostName
 output cosmosEndpoint string = cosmos.outputs.endpoint
 output cosmosDatabaseName string = cosmos.outputs.databaseName
+output documentIntelligenceEndpoint string = documentIntelligence.outputs.endpoint
 output storageAccountName string = storage.outputs.storageAccountName
 output telegramWebhookUrl string = 'https://${functionApp.outputs.defaultHostName}/api/telegram/${telegramWebhookPath}'

@@ -39,6 +39,35 @@ def get_recent(chat_id: str, limit: int) -> list[dict[str, Any]]:
     return items
 
 
+def search_by_date(
+    chat_id: str, tenant_id: str, since: str, until: str, limit: int = 300
+) -> list[dict[str, Any]]:
+    """Inbound/outbound turns for this chat within [since, until) (ISO-8601
+    UTC), oldest first, restricted to `tenant_id` — used by
+    tools/history.py::recall_chat_history so George can read back a past
+    day's real messages once they've scrolled out of the automatic
+    HISTORY_TURNS window (see function_app.py::_history_to_messages). The
+    tenantId filter matters for a dual-tenant chat: don't surface another
+    business's conversation just because it shares this chatId."""
+    query = (
+        f"SELECT TOP {int(limit)} c.ts, c.direction, c.input, c.output FROM c "
+        "WHERE c.chatId = @chatId AND c.tenantId = @tenantId AND c.ts >= @since AND c.ts < @until "
+        "ORDER BY c.ts ASC"
+    )
+    return list(
+        _container().query_items(
+            query=query,
+            parameters=[
+                {"name": "@chatId", "value": chat_id},
+                {"name": "@tenantId", "value": tenant_id},
+                {"name": "@since", "value": since},
+                {"name": "@until", "value": until},
+            ],
+            partition_key=chat_id,
+        )
+    )
+
+
 def already_processed(chat_id: str, update_id: int) -> bool:
     """Idempotency guard: a queue message can be delivered more than once
     (at-least-once delivery + retries on transient failures)."""

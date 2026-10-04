@@ -257,6 +257,8 @@ def test_tenant_scoped_tool_rejects_missing_tenant_even_with_allowed_role():
         "list_record_types",
         "search_records",
         "summarize_records",
+        "update_record",
+        "delete_record",
     ],
 )
 def test_various_tenant_scoped_reads_reject_missing_tenant(tool_name):
@@ -324,6 +326,34 @@ def test_log_record_permitted_role_passes_gate_before_hitting_cosmos():
     result, is_error = registry.dispatch(
         "log_record", {"type_key": "stock", "values": {"cantidad": 1}}, make_ctx("walker")
     )
+    assert is_error is True
+    assert "rol" not in result.lower()
+
+
+def test_update_record_denied_for_walker():
+    result, is_error = registry.dispatch(
+        "update_record", {"record_id": "r1", "values": {"cantidad": 1}}, make_ctx("walker")
+    )
+    assert is_error is True
+    assert "rol" in result.lower()
+
+
+def test_update_record_permitted_role_passes_gate_before_hitting_cosmos():
+    result, is_error = registry.dispatch(
+        "update_record", {"record_id": "r1", "values": {"cantidad": 1}}, make_ctx("admin")
+    )
+    assert is_error is True
+    assert "rol" not in result.lower()
+
+
+def test_delete_record_denied_for_walker():
+    result, is_error = registry.dispatch("delete_record", {"record_id": "r1"}, make_ctx("walker"))
+    assert is_error is True
+    assert "rol" in result.lower()
+
+
+def test_delete_record_permitted_role_passes_gate_before_hitting_cosmos():
+    result, is_error = registry.dispatch("delete_record", {"record_id": "r1"}, make_ctx("admin"))
     assert is_error is True
     assert "rol" not in result.lower()
 

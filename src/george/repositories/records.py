@@ -187,6 +187,43 @@ def summarize_records(
     return sorted(totals.values(), key=lambda bucket: bucket["groupKey"])
 
 
+def get_record(tenant_id: str, record_id: str) -> Optional[dict[str, Any]]:
+    try:
+        doc = _container().read_item(item=record_id, partition_key=tenant_id)
+    except exceptions.CosmosResourceNotFoundError:
+        return None
+    return doc if doc.get("docType") == "record" else None
+
+
+def update_record(
+    tenant_id: str,
+    record_id: str,
+    values: dict[str, Any],
+    amount: float,
+    group_key: str,
+    occurred_at: str,
+    period: str,
+    client_id: Optional[str] = None,
+    client_name: Optional[str] = None,
+    notes: Optional[str] = None,
+) -> dict[str, Any]:
+    doc = _container().read_item(item=record_id, partition_key=tenant_id)
+    doc.update(
+        {
+            "values": values,
+            "amount": amount,
+            "groupKey": group_key,
+            "occurredAt": occurred_at,
+            "period": period,
+            "clientId": client_id,
+            "clientName": client_name,
+            "notes": notes,
+            "updatedAt": utc_now_iso(),
+        }
+    )
+    return _container().replace_item(item=record_id, body=doc)
+
+
 def delete_record(tenant_id: str, record_id: str) -> bool:
     try:
         _container().delete_item(item=record_id, partition_key=tenant_id)

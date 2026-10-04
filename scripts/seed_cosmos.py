@@ -77,6 +77,7 @@ def main() -> None:
     os.environ.setdefault("TELEGRAM_WEBHOOK_PATH", "seed-script-placeholder")
     os.environ.setdefault("ANTHROPIC_API_KEY", "seed-script-placeholder")
     os.environ.setdefault("GROQ_API_KEY", "seed-script-placeholder")
+    os.environ.setdefault("DOCUMENT_INTELLIGENCE_ENDPOINT", "https://seed-script-placeholder.cognitiveservices.azure.com")
     os.environ["PLATFORM_ADMIN_CHAT_ID"] = args.platform_admin_chat_id
 
     from azure.cosmos import CosmosClient, PartitionKey, exceptions

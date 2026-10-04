@@ -437,6 +437,20 @@ def test_list_tenants_is_platform_admin_only():
     assert "rol" in result.lower()
 
 
+def test_get_chat_memberships_is_platform_admin_only():
+    result, is_error = registry.dispatch("get_chat_memberships", {"chat_id": "999"}, make_ctx("owner"))
+    assert is_error is True
+    assert "rol" in result.lower()
+
+
+def test_get_chat_memberships_permitted_role_passes_gate_before_hitting_cosmos():
+    result, is_error = registry.dispatch(
+        "get_chat_memberships", {"chat_id": "999"}, make_ctx("platform_admin", tenant_id=None)
+    )
+    assert is_error is True
+    assert "rol" not in result.lower()
+
+
 # ---------------------------------------------------------------------------
 # Platform-configurable default reminder templates
 # ---------------------------------------------------------------------------

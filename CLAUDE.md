@@ -61,6 +61,26 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
   solo. **Una vez que un chat ya pertenece a un tenant, el `owner` de ESE tenant puede seguir
   sumando/editando su propio equipo con `upsert_chat`** (restringido a `ctx.tenant_id`, nunca
   toca membership de otro negocio).
+- **`create_tenant` rechaza crear un tenant con el mismo nombre si el `owner_chat_id` ya es
+  miembro de uno así.** Caso real (2026-10-04): un owner mencionó un negocio distinto al activo
+  (empanadas, mientras operaba paseo de perros) y George asumió que había que crear un tenant
+  desde cero sin chequear primero si ya existía — y sí existía, el mismo chat ya era owner de
+  "Empanadas Andrés Romero" desde hacía semanas. El chequeo vive en el handler de
+  `tools/tenants.py::_create_tenant` (compara nombre case-insensitive contra las memberships ya
+  existentes de `owner_chat_id`), no solo en el prompt — mismo criterio que el resto de la
+  "doble validación de rol" de este proyecto: el prompt ya le dice a George que llame
+  `list_my_businesses`/`list_tenants` antes de proponer un tenant nuevo, pero después de que una
+  regla de prompt análoga (la de `log_record`) ya falló dos veces en producción, la corrección de
+  fondo no puede ser solo texto.
+- **`get_chat_memberships(chat_id)` (`tools/tenants.py`, platform_admin) — existe porque
+  `list_tenants` no alcanza para responder "¿a qué negocios pertenece el chat X?".** Caso real
+  (2026-10-04): le preguntaron eso a George en modo plataforma, llamó `list_tenants` (que lista
+  TODOS los tenants sin info de owner) y presentó los 5 resultados como si los 5 pertenecieran al
+  chat preguntado — una fabricación, ya que esa tool no tiene ninguna forma de filtrar por chat.
+  `get_chat_memberships` lee `chats_repo.get_chat(chat_id)` directamente (lo mismo que
+  `list_my_businesses` hace para `ctx.chat_id`, pero para cualquier chat, no solo el que está
+  hablando) — así platform_admin puede responder esa pregunta con datos reales en vez de
+  inventarlos a partir de una lista sin filtrar.
 - **Resolución de rol/tenant activo por mensaje — `george.context.resolve_role_and_tenant`**
   (vivió en `function_app.py` hasta que `agent.py` también necesitó llamarla — ver el punto de
   refresco a mitad de turno más abajo):
@@ -171,15 +191,45 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
   confirmaba "anotado" sin llamar `log_record` (ver la regla nueva en `prompts.py` sobre esto); la
   única forma de recuperarlos es releer los mensajes reales de esa noche, no reconstruirlos de
   memoria (que es probado-pobre: Haiku ya se equivocó dos veces tratando de recordar ese mismo día
-  sin releerlo). `recall_chat_history(since_date, until_date)` filtra por `/chatId` (partition key
-  de `conversations`) Y por `tenantId` — la única lectura de ese contenedor que SÍ filtra por
-  tenant (contraste con la nota de la tabla de esquema más abajo: para todo lo demás es metadato);
-  importa para un chat dual-tenant, que no debería ver la conversación de OTRO negocio solo porque
-  comparte `chatId`. Los límites del día se calculan en la zona horaria del negocio
-  (`ctx.tenant.timezone`), no UTC — "el martes" lo dice el usuario pensando en hora de Bogotá, y
-  una conversación que cruza la medianoche UTC (como la del supermercado, 23:40 a 00:31 UTC) debe
-  seguir cayendo en un solo día. Restringida a `owner`/`admin` (no `walker`) porque expone texto
-  crudo de la conversación, no datos ya curados.
+  sin releerlo). `recall_chat_history(since_date, until_date)` busca por `tenantId` **en todos los
+  chats de ese negocio**, no solo en el del que pregunta — es la única lectura de `conversations`
+  que filtra por tenant en vez de por `/chatId` (su partition key), así que es cross-partition
+  (`enable_cross_partition_query=True`; mismo tradeoff que `records.py::summarize_records` a esta
+  escala). No siempre fue así: nació scoped a `ctx.chat_id` ("recupera lo que YO te mandé"), pero
+  un segundo incidente real (2026-10-04) mostró el problema — un miembro del equipo con un chat
+  distinto al de Julián pidió recuperar un día que ella no había escrito, la búsqueda (scoped a su
+  chat) no encontró nada, y George le dijo "la conversación no quedó registrada", dando a entender
+  que se perdió información cuando en realidad estaba guardada bajo el chat de Julián. El
+  historial de un negocio es información operativa compartida de su equipo (mismos roles
+  owner/admin que ya podían usar esta tool), no privada de cada chat, así que se ensanchó el
+  alcance en vez de solo arreglar el mensaje. Los límites del día se calculan en la zona horaria
+  del negocio (`ctx.tenant.timezone`), no UTC — "el martes" lo dice el usuario pensando en hora de
+  Bogotá, y una conversación que cruza la medianoche UTC (como la del supermercado, 23:40 a 00:31
+  UTC) debe seguir cayendo en un solo día. Restringida a `owner`/`admin` (no `walker`) porque
+  expone texto crudo de la conversación, no datos ya curados.
+- **La alucinación de "ya lo cargué" sin llamar ninguna tool volvió a pasar después del primer fix
+  — dos veces el mismo día (2026-10-04).** El refuerzo de `prompts.py` (ver más abajo, "Prompt
+  reforzado...") no fue suficiente por sí solo: Haiku repitió el mismo patrón con una lista más
+  larga (~25 ítems en vez de ~18). Hay evidencia de una causa concreta y no solo "el modelo decide
+  ignorar la regla": el `max_tokens=1024` original de `agent.py` no alcanzaba para que el modelo
+  emitiera muchos `log_record` de una (un usuario poniéndose al día con un backlog grande), la
+  respuesta se cortaba a mitad de generación (`stop_reason="max_tokens"`, Anthropic descarta el
+  bloque de tool_use incompleto), y el turno SIGUIENTE, al ver en el historial su propio mensaje
+  previo trunco ("voy a cargar todo..."), fabricaba un resumen de éxito en vez de reintentar las
+  tool calls. Dos arreglos en `agent.py`, ninguno suficiente solo:
+  1. `_CHAT_MAX_TOKENS = 4096` (antes 1024) en las cuatro llamadas a `client.messages.create` del
+     loop — reduce cuántas veces se da la condición de corte que dispara lo anterior, pero no lo
+     garantiza para cualquier tamaño de backlog.
+  2. Un backstop mecánico, no otra vuelta de prompt: si un turno termina en `end_turn` con **cero**
+     tool calls en TODO el mensaje (no solo esa iteración) y el texto matchea `_CONFIRMATION_RE`
+     (mismo regex que se uso para encontrar estos casos en prod — "anotado", "✓", "registrado",
+     etc.), no se le manda esa respuesta al usuario: se agrega `_VERIFY_NUDGE` como un mensaje más
+     y se fuerza una vuelta adicional con las tools habilitadas antes de responder. Si esa vuelta
+     sí llama una tool, se hace además la misma llamada final con `tool_choice: "none"` que ya
+     existía para el caso de `MAX_TOOL_TURNS`, para que la respuesta quede basada en lo que la
+     tool realmente devolvió. Deliberadamente mecánico en vez de una instrucción más larga: una
+     regla de texto ya falló dos veces con este exacto failure mode, así que la verificación no
+     puede depender de que el modelo se acuerde de aplicarla.
 - **`PLATFORM_ADMIN_CHAT_ID`** (antes `OWNER_CHAT_ID`) es el chat que recibe alertas de la cola
   envenenada y el que se siembra con `isPlatformAdmin: true` — ya no es "el dueño del negocio",
   es el operador de toda la plataforma.
@@ -412,7 +462,7 @@ en ISO-8601 UTC.
 | `finance` | `/tenantId` | Un doc por movimiento (`charge\|payment\|expense`), `clientId`, `balance`, `status`, `currency` (heredada del tenant). `expense` es el único tipo sin cliente — `clientId`/`clientName` quedan `None` (ver nota abajo). |
 | `reminders` | `/id` (ver nota arriba) | `tenantId`, `schedule` (`cron`/`once`), `target` (`role`/`chat`), `nextRunAt` (UTC). |
 | `pqrs` | `/tenantId` | Peticiones/quejas/reclamos/sugerencias, `reportedBy`, `status`. |
-| `conversations` | `/chatId` | Auditoría por turno: tokens, costo, latencia, tool calls. `tenantId` es metadato para casi todo (ya está implícito en `chatId`) — la excepción es `recall_chat_history` (`tools/history.py`), que sí filtra por `tenantId` para no mezclar negocios en un chat dual-tenant. `stt`/`ocr` llevan metadata del proveedor (modelo, latencia) cuando el turno vino de una nota de voz o una foto, respectivamente. |
+| `conversations` | `/chatId` | Auditoría por turno: tokens, costo, latencia, tool calls. `tenantId` es metadato para casi todo (ya está implícito en `chatId`) — la excepción es `recall_chat_history` (`tools/history.py`), que busca por `tenantId` cross-partition, a propósito, para traer el historial de TODOS los chats de un negocio, no solo el que pregunta (ver nota más abajo). `stt`/`ocr` llevan metadata del proveedor (modelo, latencia) cuando el turno vino de una nota de voz o una foto, respectivamente. |
 | `platformConfig` | `/id` | Config de plataforma, gestionada por `platform_admin`. Un solo doc hoy (`id: "default_reminders"`): `templates[]` que `create_tenant` siembra en cada negocio nuevo (ver `get_default_reminder_templates`/`set_default_reminder_templates` en `tools/tenants.py`). No afecta negocios ya creados. |
 | `records` | `/tenantId` | Tipos de registro definidos por el owner (`docType: "type_definition"`, `id: "type::<typeKey>"`, `fields[]`, `mode`, `measureField`, `groupField`, `clientLink`) y los registros cargados contra ellos (`docType: "record"`, `values{}`, `amount`/`groupKey` denormalizados, `occurredAt`, `period`). Ver la nota sobre "Tipos de registro definidos por el owner" más arriba. |
 

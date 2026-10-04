@@ -39,31 +39,41 @@ def get_recent(chat_id: str, limit: int) -> list[dict[str, Any]]:
     return items
 
 
-def search_by_date(
-    chat_id: str, tenant_id: str, since: str, until: str, limit: int = 300
-) -> list[dict[str, Any]]:
-    """Inbound/outbound turns for this chat within [since, until) (ISO-8601
-    UTC), oldest first, restricted to `tenant_id` — used by
-    tools/history.py::recall_chat_history so George can read back a past
-    day's real messages once they've scrolled out of the automatic
-    HISTORY_TURNS window (see function_app.py::_history_to_messages). The
-    tenantId filter matters for a dual-tenant chat: don't surface another
-    business's conversation just because it shares this chatId."""
+def search_by_date(tenant_id: str, since: str, until: str, limit: int = 300) -> list[dict[str, Any]]:
+    """Inbound/outbound turns for this TENANT — across every chat that
+    belongs to it, not just one — within [since, until) (ISO-8601 UTC),
+    oldest first. Used by tools/history.py::recall_chat_history so George
+    can read back a past day's real messages once they've scrolled out of
+    the automatic HISTORY_TURNS window (see
+    function_app.py::_history_to_messages).
+
+    Originally scoped to a single chatId (the partition key), on the theory
+    that "recupera lo que te mandé" meant one person's own messages. Real
+    incident (2026-10-04): a second team member (different chatId, same
+    tenant) asked to recall a day she hadn't personally written in, got an
+    empty result, and George told her "la conversación no quedó
+    registrada" — implying data loss, when it had simply been written by a
+    teammate under a different chatId. A business's conversation history is
+    shared operational data for its own team (owner/admin, same roles this
+    tool is already gated to), not private per chat, so this is
+    intentionally cross-partition (/chatId) and filtered by tenantId
+    instead — same tradeoff already made elsewhere at this bot's scale (see
+    records.py::summarize_records, or the ad-hoc audits that found this
+    very bug)."""
     query = (
-        f"SELECT TOP {int(limit)} c.ts, c.direction, c.input, c.output FROM c "
-        "WHERE c.chatId = @chatId AND c.tenantId = @tenantId AND c.ts >= @since AND c.ts < @until "
+        f"SELECT TOP {int(limit)} c.chatId, c.userName, c.ts, c.direction, c.input, c.output FROM c "
+        "WHERE c.tenantId = @tenantId AND c.ts >= @since AND c.ts < @until "
         "ORDER BY c.ts ASC"
     )
     return list(
         _container().query_items(
             query=query,
             parameters=[
-                {"name": "@chatId", "value": chat_id},
                 {"name": "@tenantId", "value": tenant_id},
                 {"name": "@since", "value": since},
                 {"name": "@until", "value": until},
             ],
-            partition_key=chat_id,
+            enable_cross_partition_query=True,
         )
     )
 

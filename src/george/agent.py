@@ -6,6 +6,7 @@ point explicit rather than hidden inside SDK internals.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -22,6 +23,35 @@ logger = logging.getLogger("george.agent")
 
 # Safety cap — stop looping even if the model keeps requesting tools forever.
 MAX_TOOL_TURNS = 8
+
+# Real incidents (2026-10-04, see CLAUDE.md) showed 1024 wasn't enough output
+# budget when the model needs to emit many tool_use blocks in one turn (a
+# user catching up a backlog of ~20 dictated items at once) — the response
+# got cut off mid-generation (stop_reason="max_tokens"), Anthropic drops the
+# incomplete trailing block, and the NEXT turn then saw its own truncated
+# "voy a cargar todo..." in history and fabricated a success summary instead
+# of retrying. Raising the budget doesn't guarantee a huge batch always
+# fits, but it covers realistic cases and removes the single biggest
+# observed trigger for that failure mode.
+_CHAT_MAX_TOKENS = 4096
+
+# Second, independent backstop for the same failure mode (George claiming a
+# write happened without calling any tool) — this one covers the cases that
+# aren't max_tokens-triggered, where the model just... doesn't. Reusing the
+# scan heuristic that found these in prod (see the investigation scripts
+# from 2026-10-04): a turn that ends with zero tool calls and text matching
+# this is treated as suspect and gets one corrective round-trip, grounded in
+# whether a tool call actually happened, before it ever reaches the user.
+_CONFIRMATION_RE = re.compile(
+    r"(anot[ée]|anotad[oa]s?|registr[ée]|registrad[oa]s?|guard[ée]|guardad[oa]s?|carg[uqé]|cargad[oa]s?|✅|✓)",
+    re.IGNORECASE,
+)
+_VERIFY_NUDGE = (
+    "[Verificación automática] Tu respuesta anterior suena a que ya guardaste, registraste o cargaste algo, pero "
+    "no llamaste ninguna herramienta en este turno. Si corresponde guardar algo, hacé la llamada a la herramienta "
+    "correspondiente AHORA MISMO. Si no hay nada que guardar (fue solo una aclaración, una respuesta a una "
+    "pregunta, etc.), reescribí tu respuesta anterior sin dar a entender que algo quedó guardado."
+)
 
 # `ToolContext` is frozen and resolved once per inbound message (see
 # george.context.build_context) — but switch_business/switch_to_platform_admin
@@ -82,6 +112,49 @@ def _get_client() -> anthropic.Anthropic:
     return _client
 
 
+def _dispatch_tool_use_blocks(
+    response: Any,
+    ctx: ToolContext,
+    tool_names: Optional[tuple[str, ...]],
+    tool_calls_log: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], bool]:
+    """Dispatches every tool_use block in `response.content`, appending an
+    audit entry to `tool_calls_log` for each (mutated in place — shared with
+    the caller's running total for this whole run_agent call) and returning
+    (tool_results, context_switched) — the content list to send back as the
+    next user message, and whether a switch_business/switch_to_platform_admin
+    call succeeded (see _CONTEXT_SWITCH_TOOLS)."""
+    tool_results: list[dict[str, Any]] = []
+    context_switched = False
+    for block in response.content:
+        if block.type != "tool_use":
+            continue
+        call_start = time.monotonic()
+        result_text, is_error = registry.dispatch(block.name, block.input, ctx, only=tool_names)
+        call_latency_ms = (time.monotonic() - call_start) * 1000
+        tool_calls_log.append(
+            {
+                "name": block.name,
+                "input": block.input,
+                "ok": not is_error,
+                "resultSummary": result_text[:500],
+                "latencyMs": round(call_latency_ms, 1),
+                "error": result_text if is_error else None,
+            }
+        )
+        tool_results.append(
+            {
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": result_text,
+                "is_error": is_error,
+            }
+        )
+        if not is_error and block.name in _CONTEXT_SWITCH_TOOLS:
+            context_switched = True
+    return tool_results, context_switched
+
+
 def run_agent(
     ctx: ToolContext,
     history: list[dict[str, Any]],
@@ -118,7 +191,7 @@ def run_agent(
         turns += 1
         response = client.messages.create(
             model=settings.anthropic_model,
-            max_tokens=1024,
+            max_tokens=_CHAT_MAX_TOKENS,
             system=system_prompt,
             tools=tools,
             messages=messages,
@@ -130,35 +203,7 @@ def run_agent(
             break
 
         messages.append({"role": "assistant", "content": response.content})
-
-        tool_results: list[dict[str, Any]] = []
-        context_switched = False
-        for block in response.content:
-            if block.type != "tool_use":
-                continue
-            call_start = time.monotonic()
-            result_text, is_error = registry.dispatch(block.name, block.input, ctx, only=tool_names)
-            call_latency_ms = (time.monotonic() - call_start) * 1000
-            tool_calls.append(
-                {
-                    "name": block.name,
-                    "input": block.input,
-                    "ok": not is_error,
-                    "resultSummary": result_text[:500],
-                    "latencyMs": round(call_latency_ms, 1),
-                    "error": result_text if is_error else None,
-                }
-            )
-            tool_results.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": result_text,
-                    "is_error": is_error,
-                }
-            )
-            if not is_error and block.name in _CONTEXT_SWITCH_TOOLS:
-                context_switched = True
+        tool_results, context_switched = _dispatch_tool_use_blocks(response, ctx, tool_names, tool_calls)
         messages.append({"role": "user", "content": tool_results})
 
         if context_switched:
@@ -190,7 +235,7 @@ def run_agent(
         logger.warning("agent: hit MAX_TOOL_TURNS=%d for chat %s", MAX_TOOL_TURNS, ctx.chat_id)
         response = client.messages.create(
             model=settings.anthropic_model,
-            max_tokens=1024,
+            max_tokens=_CHAT_MAX_TOKENS,
             system=system_prompt,
             tool_choice={"type": "none"},
             tools=tools,
@@ -198,6 +243,61 @@ def run_agent(
         )
         total_input += response.usage.input_tokens
         total_output += response.usage.output_tokens
+
+    # Mechanical backstop for "George says it saved something but never
+    # called a tool" (see _CONFIRMATION_RE above — this is a real, repeated
+    # prod failure, not a hypothetical). Only fires when NO tool was called
+    # anywhere in this entire message (tool_calls is the running total for
+    # the whole call, not just this iteration), so it never second-guesses a
+    # turn that legitimately wrote something earlier and is now summarizing.
+    if not tool_calls and response is not None and response.stop_reason == "end_turn":
+        suspect_text = next((b.text for b in response.content if b.type == "text"), "")
+        if _CONFIRMATION_RE.search(suspect_text):
+            logger.warning(
+                "agent: suspicious no-tool confirmation for chat %s, forcing a verification round", ctx.chat_id
+            )
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": _VERIFY_NUDGE})
+            response = client.messages.create(
+                model=settings.anthropic_model,
+                max_tokens=_CHAT_MAX_TOKENS,
+                system=system_prompt,
+                tools=tools,
+                messages=messages,
+            )
+            total_input += response.usage.input_tokens
+            total_output += response.usage.output_tokens
+
+            if response.stop_reason == "tool_use":
+                messages.append({"role": "assistant", "content": response.content})
+                tool_results, context_switched = _dispatch_tool_use_blocks(response, ctx, tool_names, tool_calls)
+                messages.append({"role": "user", "content": tool_results})
+                if context_switched:
+                    refreshed_ctx, refresh_error = context.build_context(
+                        ctx.chat_id, ctx.user_name, ctx.correlation_id
+                    )
+                    if refreshed_ctx is not None:
+                        ctx = refreshed_ctx
+                        if owns_system_prompt:
+                            system_prompt = build_system_prompt(ctx)
+                    else:
+                        logger.warning(
+                            "agent: failed to refresh context after a business switch for chat %s: %s",
+                            ctx.chat_id,
+                            refresh_error,
+                        )
+                # Ground the final reply in what the tool(s) just returned,
+                # same reasoning as the MAX_TOOL_TURNS branch above.
+                response = client.messages.create(
+                    model=settings.anthropic_model,
+                    max_tokens=_CHAT_MAX_TOKENS,
+                    system=system_prompt,
+                    tool_choice={"type": "none"},
+                    tools=tools,
+                    messages=messages,
+                )
+                total_input += response.usage.input_tokens
+                total_output += response.usage.output_tokens
 
     latency_ms = (time.monotonic() - start) * 1000
     reply_text = ""

@@ -48,6 +48,14 @@ class Settings:
     groq_api_key: str = field(default_factory=lambda: _env("GROQ_API_KEY", required=True))
     groq_stt_model: str = field(default_factory=lambda: _env("GROQ_STT_MODEL", "whisper-large-v3-turbo"))
 
+    # OCR for Telegram photos (george/document_intelligence.py). No key setting —
+    # same managed-identity-only pattern as Cosmos (disableLocalAuth: true on the
+    # resource); locally, DefaultAzureCredential falls back to `az login`, which
+    # needs the same RBAC grant documented in CLAUDE.md for Cosmos.
+    document_intelligence_endpoint: str = field(
+        default_factory=lambda: _env("DOCUMENT_INTELLIGENCE_ENDPOINT", required=True)
+    )
+
     # Multi-tenant platform
     default_timezone: str = field(default_factory=lambda: _env("DEFAULT_TIMEZONE", "America/Bogota"))
     # The platform operator's chat — role=platform_admin in `chats`, receives

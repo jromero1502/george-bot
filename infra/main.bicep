@@ -28,6 +28,10 @@ param anthropicApiKey string
 @secure()
 param groqApiKey string
 
+@description('Document Intelligence pricing tier for OCR on Telegram photos')
+@allowed(['S0', 'F0'])
+param documentIntelligenceSku string = 'S0'
+
 @description('Telegram chatId of the platform operator — seeded with role=platform_admin, receives poison-queue alerts, and is the only role that can create new tenants (businesses) via the create_tenant tool')
 param platformAdminChatId string
 
@@ -67,6 +71,7 @@ module resources 'modules/resources.bicep' = {
     telegramWebhookPath: telegramWebhookPath
     anthropicApiKey: anthropicApiKey
     groqApiKey: groqApiKey
+    documentIntelligenceSku: documentIntelligenceSku
     platformAdminChatId: platformAdminChatId
     anthropicModel: anthropicModel
     defaultTimezone: defaultTimezone
@@ -81,5 +86,6 @@ output functionAppName string = resources.outputs.functionAppName
 output functionAppHostName string = resources.outputs.functionAppHostName
 output cosmosEndpoint string = resources.outputs.cosmosEndpoint
 output cosmosDatabaseName string = resources.outputs.cosmosDatabaseName
+output documentIntelligenceEndpoint string = resources.outputs.documentIntelligenceEndpoint
 output storageAccountName string = resources.outputs.storageAccountName
 output telegramWebhookUrl string = resources.outputs.telegramWebhookUrl

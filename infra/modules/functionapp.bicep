@@ -30,6 +30,9 @@ param anthropicApiKey string
 @secure()
 param groqApiKey string
 
+@description('Document Intelligence endpoint for OCR on Telegram photos — no key app setting, auth is via the Function App\'s managed identity (see resources.bicep\'s role assignment)')
+param documentIntelligenceEndpoint string
+
 param anthropicModel string = 'claude-haiku-4-5'
 
 param defaultTimezone string = 'America/Bogota'
@@ -126,6 +129,10 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         {
           name: 'GROQ_API_KEY'
           value: groqApiKey
+        }
+        {
+          name: 'DOCUMENT_INTELLIGENCE_ENDPOINT'
+          value: documentIntelligenceEndpoint
         }
         {
           name: 'ANTHROPIC_MODEL'

@@ -16,6 +16,7 @@ import azure.functions as func
 from george import context, telegram
 from george.agent import AgentResult, generate_reminder_message, generate_report_message, run_agent
 from george.config import estimate_cost_usd, settings
+from george.document_intelligence import extract_text as extract_image_text
 from george.groq_stt import transcribe
 from george.repositories import chats as chats_repo
 from george.repositories import conversations as conversations_repo
@@ -141,6 +142,7 @@ def process_update(msg: func.QueueMessage) -> None:
 
     input_record: dict[str, Any]
     stt_record: Optional[dict[str, Any]] = None
+    ocr_record: Optional[dict[str, Any]] = None
     user_text: Optional[str]
 
     if "voice" in message:
@@ -172,11 +174,42 @@ def process_update(msg: func.QueueMessage) -> None:
             **stt_meta,
         }
         input_record["transcript"] = user_text
+    elif "photo" in message:
+        # Telegram sends one PhotoSize per resolution, smallest first — the
+        # last one is the highest-resolution version.
+        photo = message["photo"][-1]
+        caption = message.get("caption")
+        input_record = {
+            "type": "photo",
+            "text": None,
+            "image": {
+                "fileId": photo.get("file_id"),
+                "width": photo.get("width"),
+                "height": photo.get("height"),
+                "caption": caption,
+            },
+        }
+        # Test hook: scripts/simulate_update.py --photo bypasses Telegram's
+        # getFile/download the same way --voice does for localAudioPath.
+        local_path = payload.get("localImagePath")
+        if local_path:
+            with open(local_path, "rb") as f:
+                image_bytes = f.read()
+        else:
+            file_path = telegram.get_file(photo["file_id"])
+            image_bytes = telegram.download_file(file_path)
+
+        ocr_text, ocr_meta = extract_image_text(image_bytes)
+        ocr_record = {"provider": "azure_document_intelligence", "model": "prebuilt-read", **ocr_meta}
+        ocr_note = ocr_text or "(no se detectó texto en la imagen)"
+        label = "Texto extraído de la imagen enviada (OCR automático, puede tener errores de lectura)"
+        user_text = f"{caption}\n\n[{label}]:\n{ocr_note}" if caption else f"[{label}]:\n{ocr_note}"
+        input_record["transcript"] = user_text
     elif "text" in message:
         user_text = message["text"]
         input_record = {"type": "text", "text": user_text, "transcript": None}
     else:
-        telegram.send_message(chat_id, "Por ahora solo puedo procesar mensajes de texto o notas de voz.")
+        telegram.send_message(chat_id, "Por ahora solo puedo procesar mensajes de texto, fotos o notas de voz.")
         return
 
     if not user_text or not user_text.strip():
@@ -216,6 +249,7 @@ def process_update(msg: func.QueueMessage) -> None:
             "costUsd": round(estimate_cost_usd(result.input_tokens, result.output_tokens), 6),
         },
         stt=stt_record,
+        ocr=ocr_record,
         toolCalls=result.tool_calls,
         trace={
             "correlationId": correlation_id,

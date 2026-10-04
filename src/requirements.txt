@@ -15,6 +15,9 @@ azure-core==1.41.0
 anthropic==1.5.0
 httpx==0.28.1
 
+# OCR for Telegram photos (Azure AI Document Intelligence, prebuilt-read model)
+azure-ai-documentintelligence==1.0.2
+
 # Cron -> next-run-at calculation for reminders
 croniter==6.2.4
 

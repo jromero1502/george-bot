@@ -134,6 +134,7 @@ python scripts/simulate_update.py --chat 111111111 --text "crea un negocio de pe
 # Como owner de un tenant (usa el chatId sembrado con --demo-tenant-owner-chat-id, o el que haya creado platform_admin)
 python scripts/simulate_update.py --chat 222222222 --text "cuanto me debe Maria"
 python scripts/simulate_update.py --chat 222222222 --voice ./samples/nota.ogg   # requiere GROQ_API_KEY real
+python scripts/simulate_update.py --chat 222222222 --photo ./samples/recibo.jpg --caption "esto fue hoy"  # requiere DOCUMENT_INTELLIGENCE_ENDPOINT real
 python scripts/simulate_update.py --text "hola" --chat 999999999               # chat no autorizado -> se descarta
 
 # Dispara el scan de recordatorios sin esperar los 10 minutos
@@ -230,6 +231,7 @@ sin `--demo-tenant-*`); los negocios reales se crean conversando con George como
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_WEBHOOK_PATH` | Telegram. El secreto real es el header `X-Telegram-Bot-Api-Secret-Token`; la function key y el path son capas adicionales. |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Claude Haiku (`claude-haiku-4-5` por defecto). |
 | `GROQ_API_KEY`, `GROQ_STT_MODEL` | Whisper (`whisper-large-v3-turbo` por defecto). |
+| `DOCUMENT_INTELLIGENCE_ENDPOINT` | OCR de fotos (Azure AI Document Intelligence, modelo `prebuilt-read`). Sin key — se usa la identidad administrada, igual que Cosmos. |
 | `DEFAULT_TIMEZONE` | Fallback cuando un tenant no especifica su propia zona horaria. |
 | `PLATFORM_ADMIN_CHAT_ID` | ChatId del operador de la plataforma — recibe alertas de la cola envenenada y es quien crea negocios nuevos. |
 | `HISTORY_TURNS` | Cuántos turnos previos se cargan como contexto del agente (12 por defecto). |

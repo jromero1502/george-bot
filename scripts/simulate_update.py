@@ -10,6 +10,7 @@ instead of calling a real API).
 Examples:
     python scripts/simulate_update.py --text "cuanto me debe Maria"
     python scripts/simulate_update.py --voice ./samples/nota.ogg
+    python scripts/simulate_update.py --photo ./samples/recibo.jpg --caption "esto fue hoy"
     python scripts/simulate_update.py --text "hola" --chat 999999999   # unauthorized chat -> 200, dropped
 """
 from __future__ import annotations
@@ -26,7 +27,13 @@ import httpx
 _counter = itertools.count(start=int(time.time()))
 
 
-def build_update(chat_id: str, text: Optional[str], voice_path: Optional[str]) -> dict[str, Any]:
+def build_update(
+    chat_id: str,
+    text: Optional[str],
+    voice_path: Optional[str],
+    photo_path: Optional[str],
+    caption: Optional[str],
+) -> dict[str, Any]:
     message: dict[str, Any] = {
         "message_id": next(_counter),
         "date": int(time.time()),
@@ -46,6 +53,20 @@ def build_update(chat_id: str, text: Optional[str], voice_path: Optional[str]) -
         # update never has this field, but our webhook forwards it verbatim
         # to the queue message so process_update can skip getFile/download.
         message["localAudioPath"] = os.path.abspath(voice_path)
+    elif photo_path:
+        message["photo"] = [
+            {
+                "file_id": "LOCAL-FAKE-FILE-ID",
+                "file_unique_id": "LOCAL-FAKE-FILE-ID",
+                "width": 0,
+                "height": 0,
+                "file_size": os.path.getsize(photo_path),
+            }
+        ]
+        if caption:
+            message["caption"] = caption
+        # Same bypass as localAudioPath above, for the photo/OCR branch.
+        message["localImagePath"] = os.path.abspath(photo_path)
     else:
         message["text"] = text
 
@@ -56,6 +77,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--text", help="Simulate a text message")
     parser.add_argument("--voice", help="Path to a local .ogg/.mp3 file to simulate a voice note")
+    parser.add_argument("--photo", help="Path to a local image file to simulate a photo message")
+    parser.add_argument("--caption", help="Caption text to send alongside --photo (optional)")
     parser.add_argument("--chat", default=os.environ.get("PLATFORM_ADMIN_CHAT_ID", "111111111"))
     parser.add_argument("--base-url", default="http://localhost:7071")
     parser.add_argument("--path", default=os.environ.get("TELEGRAM_WEBHOOK_PATH", "local-dev-path"))
@@ -63,12 +86,14 @@ def main() -> None:
     parser.add_argument("--function-key", default=None, help="Only needed against a deployed app (authLevel=function)")
     args = parser.parse_args()
 
-    if not args.text and not args.voice:
-        parser.error("pass --text or --voice")
+    if not args.text and not args.voice and not args.photo:
+        parser.error("pass --text, --voice, or --photo")
     if args.voice and not os.path.isfile(args.voice):
         parser.error(f"--voice file not found: {args.voice}")
+    if args.photo and not os.path.isfile(args.photo):
+        parser.error(f"--photo file not found: {args.photo}")
 
-    update = build_update(args.chat, args.text, args.voice)
+    update = build_update(args.chat, args.text, args.voice, args.photo, args.caption)
 
     url = f"{args.base_url}/api/telegram/{args.path}"
     if args.function_key:

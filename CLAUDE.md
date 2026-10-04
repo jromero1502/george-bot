@@ -33,6 +33,7 @@ src/
     record_schema.py    Validación pura de tipos de registro definidos por el owner y sus valores
     telegram.py         Cliente Telegram Bot API (respeta DRY_RUN)
     groq_stt.py          Transcripción de voz
+    document_intelligence.py  OCR de fotos (Azure AI Document Intelligence, prebuilt-read)
     tools/               Un módulo por dominio + registry.py que los agrega + tenants.py (platform_admin)
                          + membership.py (list_my_businesses/switch_business — gestión de la propia membership)
                          + records.py (tipos de registro propios del negocio — stock, asistencia, etc.)
@@ -245,7 +246,29 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
   permite correr todo el pipeline (webhook → cola → agente → "respuesta") sin bot de Telegram
   real. `telegram.get_file()` sigue lanzando un error bajo `DRY_RUN` porque no hay archivo real
   que pedir — por eso `scripts/simulate_update.py --voice` inyecta `localAudioPath` en el
-  mensaje de cola para saltarse `getFile`/`download` por completo.
+  mensaje de cola para saltarse `getFile`/`download` por completo. `--photo` hace lo mismo con
+  `localImagePath` para el flujo de OCR (ver el punto siguiente).
+- **OCR de fotos vía Azure AI Document Intelligence, no visión nativa de Claude.** `process_update`
+  (`function_app.py`) trata un mensaje con `photo` igual que uno con `voice`: descarga el archivo
+  (o usa `localImagePath` en tests), le pasa los bytes a `document_intelligence.extract_text`
+  (modelo `prebuilt-read`, no `prebuilt-receipt`) y mete el texto plano resultante en
+  `input.transcript` — el mismo campo que usa la transcripción de voz, así que
+  `function_app._history_to_messages` no necesitó ningún cambio para que el OCR de hoy aparezca
+  como contexto en los mensajes de mañana. Deliberadamente `prebuilt-read` (OCR genérico) y no
+  `prebuilt-receipt` (un modelo que solo entiende recibos de compra): el negocio es genérico (ver
+  "Esquema de negocio genérico" más abajo), así que una foto puede ser un recibo, una lista a
+  mano, una nota de un cliente — cualquier cosa. George recibe el texto crudo marcado como OCR (no
+  como una transcripción confiable) y el prompt (`prompts.py`) le exige confirmar montos/cantidades
+  con el usuario antes de cargarlos, igual criterio que con un audio ambiguo. Esto fue una decisión
+  explícita del usuario para "no saturar a Claude" con la imagen misma — Document Intelligence hace
+  el trabajo pesado de lectura, Claude solo interpreta texto. El recurso (`Microsoft.CognitiveServices/accounts`,
+  kind `FormRecognizer`) tiene `disableLocalAuth: true` igual que Cosmos — la Function App accede
+  vía su managed identity con el rol built-in `Cognitive Services User`, sin ninguna key en
+  appSettings. No hay emulador local equivalente al de Cosmos: `local.settings.json` trae un
+  endpoint placeholder (`PENDING-FILL-AFTER-DEPLOY`) que hay que reemplazar por el real después de
+  desplegar si se quiere probar `--photo` localmente contra el recurso real (con el mismo tipo de
+  role assignment a tu usuario que ya se documenta para Cosmos, pero con el rol `Cognitive Services
+  User` en vez de Data Contributor).
 - **`agent.py::run_agent` fuerza una llamada extra sin tools si se llega a `MAX_TOOL_TURNS`
   mientras el modelo todavía quería llamar una tool.** Sin esto, la respuesta final del usuario
   podía ser el texto que el modelo escribió ANTES de ver el resultado de esa última tool call
@@ -370,7 +393,7 @@ en ISO-8601 UTC.
 | `finance` | `/tenantId` | Un doc por movimiento (`charge\|payment\|expense`), `clientId`, `balance`, `status`, `currency` (heredada del tenant). `expense` es el único tipo sin cliente — `clientId`/`clientName` quedan `None` (ver nota abajo). |
 | `reminders` | `/id` (ver nota arriba) | `tenantId`, `schedule` (`cron`/`once`), `target` (`role`/`chat`), `nextRunAt` (UTC). |
 | `pqrs` | `/tenantId` | Peticiones/quejas/reclamos/sugerencias, `reportedBy`, `status`. |
-| `conversations` | `/chatId` | Auditoría por turno: tokens, costo, latencia, tool calls. `tenantId` es metadato para casi todo (ya está implícito en `chatId`) — la excepción es `recall_chat_history` (`tools/history.py`), que sí filtra por `tenantId` para no mezclar negocios en un chat dual-tenant. |
+| `conversations` | `/chatId` | Auditoría por turno: tokens, costo, latencia, tool calls. `tenantId` es metadato para casi todo (ya está implícito en `chatId`) — la excepción es `recall_chat_history` (`tools/history.py`), que sí filtra por `tenantId` para no mezclar negocios en un chat dual-tenant. `stt`/`ocr` llevan metadata del proveedor (modelo, latencia) cuando el turno vino de una nota de voz o una foto, respectivamente. |
 | `platformConfig` | `/id` | Config de plataforma, gestionada por `platform_admin`. Un solo doc hoy (`id: "default_reminders"`): `templates[]` que `create_tenant` siembra en cada negocio nuevo (ver `get_default_reminder_templates`/`set_default_reminder_templates` en `tools/tenants.py`). No afecta negocios ya creados. |
 | `records` | `/tenantId` | Tipos de registro definidos por el owner (`docType: "type_definition"`, `id: "type::<typeKey>"`, `fields[]`, `mode`, `measureField`, `groupField`, `clientLink`) y los registros cargados contra ellos (`docType: "record"`, `values{}`, `amount`/`groupKey` denormalizados, `occurredAt`, `period`). Ver la nota sobre "Tipos de registro definidos por el owner" más arriba. |
 

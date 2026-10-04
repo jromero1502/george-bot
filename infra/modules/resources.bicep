@@ -147,28 +147,22 @@ resource cosmosDataAccessDeployer 'Microsoft.DocumentDB/databaseAccounts/sqlRole
   }
 }
 
-// Grants the Function App's system-assigned identity access to call the
-// Document Intelligence account (disableLocalAuth: true there too — RBAC is
-// the only way in). "Cognitive Services User" is the built-in role for
-// calling inference APIs (not just reading resource metadata).
-resource documentIntelligenceAccountRef 'Microsoft.CognitiveServices/accounts@2024-10-01' existing = {
-  name: documentIntelligenceAccountName
-  dependsOn: [
-    documentIntelligence
-  ]
-}
-
-var cognitiveServicesUserRoleId = 'a97b65f3-24c7-4388-baec-2e87135dc908'
-
-resource documentIntelligenceAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  scope: documentIntelligenceAccountRef
-  name: guid(documentIntelligenceAccountRef.id, functionAppName, 'cognitive-services-user')
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', cognitiveServicesUserRoleId)
-    principalId: functionApp.outputs.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
+// NOT granted here, unlike Cosmos above: Cosmos's grant is a
+// `Microsoft.DocumentDB/.../sqlRoleAssignments` sub-resource (Cosmos's own
+// data-plane RBAC, which a plain Contributor-level principal can write).
+// Document Intelligence only has standard Azure RBAC
+// (`Microsoft.Authorization/roleAssignments`), which requires "User Access
+// Administrator"/"Owner" to create — the CI/CD service principal
+// (`deployerPrincipalId`) has neither, so a bicep-managed role assignment
+// here fails template VALIDATION for the whole deployment before anything
+// gets created (confirmed in prod: 2026-10-04, `az deployment sub create`
+// aborted in ~9s with AuthorizationFailed, zero resources — not even this
+// account — actually applied). Grant the Function App's managed identity
+// "Cognitive Services User" (role id a97b65f3-24c7-4388-baec-2e87135dc908)
+// on this account manually after deploying, same pattern as the Cosmos RBAC
+// grant for your own user documented in CLAUDE.md:
+//   az role assignment create --assignee <functionApp principalId> \
+//     --role "Cognitive Services User" --scope <documentIntelligence account id>
 
 module diagnostics 'diagnostics.bicep' = {
   name: 'diagnostics'

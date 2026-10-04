@@ -195,6 +195,24 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
   ```
   (el `MSYS_NO_PATHCONV=1` es solo necesario en Git Bash en Windows — sin eso, `--scope "/"` se
   reescribe como una ruta de Windows y el comando falla con un error de parseo confuso.)
+- **Dar acceso a la Function App a Document Intelligence — paso manual, no está en el Bicep.**
+  A diferencia de Cosmos (arriba), cuyo grant es un sub-recurso propio de Cosmos
+  (`sqlRoleAssignments`) que un Contributor puede escribir, Document Intelligence solo tiene el
+  RBAC genérico de Azure (`Microsoft.Authorization/roleAssignments`), que requiere "User Access
+  Administrator" u "Owner" para crearse — el service principal de CI/CD no lo tiene. Un intento de
+  gestionar ese role assignment desde el propio Bicep hace que **toda** la deployment falle en
+  validación antes de crear nada (confirmado en prod: abortó en ~9s, ni la cuenta de Cognitive
+  Services llegó a crearse). Después de cada deploy que cree la cuenta de Document Intelligence
+  por primera vez (o la recree), otorgá el acceso a mano con un usuario que sí tenga esos permisos
+  (tu propio `az login`, igual que con Cosmos):
+  ```bash
+  az role assignment create \
+    --assignee $(az functionapp identity show --name <functionAppName> --resource-group <rg> --query principalId -o tsv) \
+    --role "Cognitive Services User" \
+    --scope $(az cognitiveservices account show --name <documentIntelligenceAccountName> --resource-group <rg> --query id -o tsv)
+  ```
+  Sin este paso, `george/document_intelligence.py` falla con un error de autorización la primera
+  vez que llega una foto — no es un bug de código, es este permiso faltante.
 
 ## Decisiones que no son obvias leyendo el código
 
@@ -262,13 +280,14 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
   con el usuario antes de cargarlos, igual criterio que con un audio ambiguo. Esto fue una decisión
   explícita del usuario para "no saturar a Claude" con la imagen misma — Document Intelligence hace
   el trabajo pesado de lectura, Claude solo interpreta texto. El recurso (`Microsoft.CognitiveServices/accounts`,
-  kind `FormRecognizer`) tiene `disableLocalAuth: true` igual que Cosmos — la Function App accede
-  vía su managed identity con el rol built-in `Cognitive Services User`, sin ninguna key en
-  appSettings. No hay emulador local equivalente al de Cosmos: `local.settings.json` trae un
-  endpoint placeholder (`PENDING-FILL-AFTER-DEPLOY`) que hay que reemplazar por el real después de
-  desplegar si se quiere probar `--photo` localmente contra el recurso real (con el mismo tipo de
-  role assignment a tu usuario que ya se documenta para Cosmos, pero con el rol `Cognitive Services
-  User` en vez de Data Contributor).
+  kind `FormRecognizer`) tiene `disableLocalAuth: true` igual que Cosmos — sin key en appSettings,
+  solo managed identity. A diferencia de Cosmos, el role assignment que le da acceso a la Function
+  App NO está en el Bicep (ver la nota más arriba, sección de accesos manuales) — hay que otorgarlo
+  a mano después de cada deploy que cree o recree la cuenta. No hay emulador local equivalente al
+  de Cosmos: `local.settings.json` trae un endpoint placeholder (`PENDING-FILL-AFTER-DEPLOY`) que
+  hay que reemplazar por el real después de desplegar si se quiere probar `--photo` localmente
+  contra el recurso real (con el mismo tipo de role assignment a tu propio usuario, documentado
+  arriba).
 - **`agent.py::run_agent` fuerza una llamada extra sin tools si se llega a `MAX_TOOL_TURNS`
   mientras el modelo todavía quería llamar una tool.** Sin esto, la respuesta final del usuario
   podía ser el texto que el modelo escribió ANTES de ver el resultado de esa última tool call

@@ -17,6 +17,10 @@ from george.tools.common import ToolContext, ToolError, ToolSpec, require_role, 
 
 _DEFINE_ROLES = ("owner",)
 _USE_ROLES = ("owner", "admin", "walker")
+# Correcting/removing an existing record (duplicates, typos, wrong values) is
+# restricted tighter than logging a new one — same split as finance.py's
+# write tools (owner/admin only, no walker).
+_EDIT_ROLES = ("owner", "admin")
 
 
 def _client_name(tenant_id: str, client_id: str) -> str:
@@ -106,6 +110,65 @@ def _log_record(input_: dict[str, Any], ctx: ToolContext) -> str:
         {"id": record["id"], "typeKey": record["typeKey"], "values": record["values"], "occurredAt": record["occurredAt"]},
         ensure_ascii=False,
     )
+
+
+def _get_existing_record(tenant_id: str, record_id: str) -> dict[str, Any]:
+    record = records_repo.get_record(tenant_id, record_id)
+    if record is None:
+        raise ToolError(f"No existe un registro con id={record_id!r}. Búscalo primero con search_records.")
+    return record
+
+
+def _update_record(input_: dict[str, Any], ctx: ToolContext) -> str:
+    require_role(ctx, _EDIT_ROLES, "update_record")
+    tenant_id = require_tenant(ctx)
+    record_id = input_["record_id"]
+    existing = _get_existing_record(tenant_id, record_id)
+
+    type_def = records_repo.get_record_type(tenant_id, existing["typeKey"])
+    if type_def is None:
+        raise ToolError(f"El tipo de registro {existing['typeKey']!r} de este registro ya no existe.")
+
+    client_link = type_def.get("clientLink", "none")
+    client_id = input_.get("client_id", existing.get("clientId"))
+    if client_link == "required" and not client_id:
+        raise ToolError(f"El tipo de registro {type_def.get('name', existing['typeKey'])!r} requiere asociar un client_id.")
+    if client_id and client_link == "none":
+        raise ToolError(f"El tipo de registro {type_def.get('name', existing['typeKey'])!r} no admite asociar un cliente.")
+    client_name = _client_name(tenant_id, client_id) if client_id else None
+
+    try:
+        values, amount, group_key, occurred_at, period = record_schema.coerce_values(
+            type_def, input_["values"], input_.get("occurred_at") or existing.get("occurredAt")
+        )
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+
+    updated = records_repo.update_record(
+        tenant_id,
+        record_id,
+        values,
+        amount,
+        group_key,
+        occurred_at,
+        period,
+        client_id=client_id,
+        client_name=client_name,
+        notes=input_.get("notes", existing.get("notes")),
+    )
+    return json.dumps(
+        {"id": updated["id"], "typeKey": updated["typeKey"], "values": updated["values"], "occurredAt": updated["occurredAt"]},
+        ensure_ascii=False,
+    )
+
+
+def _delete_record(input_: dict[str, Any], ctx: ToolContext) -> str:
+    require_role(ctx, _EDIT_ROLES, "delete_record")
+    tenant_id = require_tenant(ctx)
+    record_id = input_["record_id"]
+    existing = _get_existing_record(tenant_id, record_id)
+    records_repo.delete_record(tenant_id, record_id)
+    return json.dumps({"deleted": True, "id": record_id, "typeKey": existing.get("typeKey")}, ensure_ascii=False)
 
 
 def _search_records(input_: dict[str, Any], ctx: ToolContext) -> str:
@@ -246,6 +309,44 @@ TOOLS = [
         },
         allowed_roles=_USE_ROLES,
         handler=_log_record,
+    ),
+    ToolSpec(
+        name="update_record",
+        description=(
+            "Corrige un registro que ya existe (ej. un valor mal dictado, un duplicado que hay que dejar con los "
+            "datos correctos en vez de borrarlo). Encuentra el record_id con search_records primero. 'values' debe "
+            "traer el set COMPLETO de campos del tipo (igual que log_record), no solo el que cambia."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "record_id": {"type": "string"},
+                "values": {"type": "object", "description": "Pares clave-valor completos segun los campos definidos para ese tipo"},
+                "client_id": {"type": "string", "description": "Solo si el tipo admite asociarse a un cliente"},
+                "occurred_at": {"type": "string", "description": "ISO 8601; si se omite conserva la fecha original"},
+                "notes": {"type": "string"},
+            },
+            "required": ["record_id", "values"],
+            "additionalProperties": False,
+        },
+        allowed_roles=_EDIT_ROLES,
+        handler=_update_record,
+    ),
+    ToolSpec(
+        name="delete_record",
+        description=(
+            "Elimina un registro existente — tipicamente un duplicado (el mismo evento cargado dos veces) o una "
+            "carga claramente equivocada. Encuentra el record_id con search_records primero y confirma con el "
+            "usuario cual es el que sobra si hay mas de uno parecido."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {"record_id": {"type": "string"}},
+            "required": ["record_id"],
+            "additionalProperties": False,
+        },
+        allowed_roles=_EDIT_ROLES,
+        handler=_delete_record,
     ),
     ToolSpec(
         name="search_records",

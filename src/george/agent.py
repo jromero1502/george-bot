@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 import anthropic
 
+from george import context
 from george.config import settings
 from george.prompts import build_system_prompt
 from george.tools import registry
@@ -21,6 +22,17 @@ logger = logging.getLogger("george.agent")
 
 # Safety cap — stop looping even if the model keeps requesting tools forever.
 MAX_TOOL_TURNS = 8
+
+# `ToolContext` is frozen and resolved once per inbound message (see
+# george.context.build_context) — but switch_business/switch_to_platform_admin
+# write a NEW activeTenantId to Cosmos mid-turn, and nothing else in this loop
+# would otherwise see that until the chat's NEXT message. That's what made
+# "cambiemos al otro negocio y de una vez hacé X" fail in the same breath it
+# was asked: the switch succeeded, but every tool call for the rest of THIS
+# turn (and the audit record for it) still ran under the stale role/tenant.
+# Refreshing `ctx` right after one of these two tools succeeds lets the rest
+# of the turn continue under the business the user just switched to.
+_CONTEXT_SWITCH_TOOLS = ("switch_business", "switch_to_platform_admin")
 
 # kind='report' reminders (function_app.py::reminder_worker) run through
 # generate_report_message below with ONLY these tools available — a scheduled
@@ -51,6 +63,13 @@ class AgentResult:
     stop_reason: str
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     latency_ms: float = 0.0
+    # The tenant/role the turn ENDED on — same as the ctx the caller passed
+    # in, unless a switch_business/switch_to_platform_admin call refreshed it
+    # mid-turn (see _CONTEXT_SWITCH_TOOLS below). function_app.py logs these
+    # in `conversations` instead of the pre-call ctx so the audit record
+    # reflects where the conversation actually ended up.
+    tenant_id: Optional[str] = None
+    role: Optional[str] = None
 
 
 _client: Optional[anthropic.Anthropic] = None
@@ -82,6 +101,7 @@ def run_agent(
     regular chat behavior when omitted.
     """
     client = _get_client()
+    owns_system_prompt = system_prompt is None
     system_prompt = system_prompt or build_system_prompt(ctx)
     tools = registry.anthropic_tool_defs(only=tool_names)
 
@@ -112,6 +132,7 @@ def run_agent(
         messages.append({"role": "assistant", "content": response.content})
 
         tool_results: list[dict[str, Any]] = []
+        context_switched = False
         for block in response.content:
             if block.type != "tool_use":
                 continue
@@ -136,7 +157,27 @@ def run_agent(
                     "is_error": is_error,
                 }
             )
+            if not is_error and block.name in _CONTEXT_SWITCH_TOOLS:
+                context_switched = True
         messages.append({"role": "user", "content": tool_results})
+
+        if context_switched:
+            # Re-read the chat fresh — switch_business/switch_to_platform_admin
+            # just wrote a new activeTenantId to Cosmos; `ctx` is frozen and
+            # otherwise wouldn't see it until the chat's next message.
+            refreshed_ctx, refresh_error = context.build_context(
+                ctx.chat_id, ctx.user_name, ctx.correlation_id
+            )
+            if refreshed_ctx is not None:
+                ctx = refreshed_ctx
+                if owns_system_prompt:
+                    system_prompt = build_system_prompt(ctx)
+            else:
+                logger.warning(
+                    "agent: failed to refresh context after a business switch for chat %s: %s",
+                    ctx.chat_id,
+                    refresh_error,
+                )
     else:
         # We hit the safety cap while the model still wanted to call tools —
         # `response` above is that last (unbroken-from) turn, whose text (if
@@ -177,6 +218,8 @@ def run_agent(
         stop_reason=response.stop_reason if response is not None else "max_turns_exceeded",
         tool_calls=tool_calls,
         latency_ms=latency_ms,
+        tenant_id=ctx.tenant_id,
+        role=ctx.role,
     )
 
 

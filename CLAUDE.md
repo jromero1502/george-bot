@@ -24,6 +24,9 @@ src/
   george/
     config.py          Settings desde env vars — instanciado una vez al importar
     roles.py            Constantes de rol compartidas (PLATFORM_ADMIN_ROLE, PENDING_SELECTION_ROLE, BUSINESS_ROLES)
+    context.py          resolve_role_and_tenant + build_context — construye el ToolContext de un chat; lo usan
+                         function_app.py (una vez por mensaje) y agent.py (para refrescarlo a mitad de turno, ver
+                         más abajo)
     agent.py           Loop manual de tool use con Haiku (no el tool_runner beta del SDK)
     prompts.py         System prompt de George — por tenant, platform_admin, o pending_business_selection
     scheduling.py       cron/once -> nextRunAt en UTC (croniter + zoneinfo)
@@ -56,7 +59,9 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
   solo. **Una vez que un chat ya pertenece a un tenant, el `owner` de ESE tenant puede seguir
   sumando/editando su propio equipo con `upsert_chat`** (restringido a `ctx.tenant_id`, nunca
   toca membership de otro negocio).
-- **Resolución de rol/tenant activo por mensaje — `function_app._resolve_role_and_tenant`**:
+- **Resolución de rol/tenant activo por mensaje — `george.context.resolve_role_and_tenant`**
+  (vivió en `function_app.py` hasta que `agent.py` también necesitó llamarla — ver el punto de
+  refresco a mitad de turno más abajo):
   - `isPlatformAdmin` → rol `platform_admin`, sin tenant — **salvo que ese mismo chat también
     tenga membership de negocio propio y haya hecho `switch_business` hacia ella** (dual role,
     ver abajo), en cuyo caso opera en modo negocio hasta que pida volver.
@@ -82,6 +87,24 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
   se gatea con `ctx.is_platform_admin` (un campo de `ToolContext` que refleja el chat subyacente,
   no el modo activo de este turno) en vez de `ctx.role`, porque mientras opera un negocio propio
   `ctx.role` es un rol de negocio normal (`owner`, etc.), no `platform_admin`.
+- **`switch_business`/`switch_to_platform_admin` se refrescan a mitad de turno — bug real
+  encontrado con datos de producción, no hipotético.** `ToolContext` es frozen y se resuelve UNA
+  vez por mensaje entrante (`context.build_context`, llamado desde `function_app.process_update`
+  antes de entrar al loop de `agent.run_agent`). Un mismo mensaje puede pedir "cambiemos al otro
+  negocio y de una vez hacé X": el tool call de switch escribe `activeTenantId` nuevo en Cosmos,
+  pero sin intervención nada más en ESE mismo turno se entera — cualquier tool call posterior
+  (incluido el `upsert_reminder`/etc. que el usuario pidió en el mismo mensaje) seguía viendo el
+  `ctx.role`/`ctx.tenant_id` de ANTES del switch, y fallaba con un error de permisos o tenant
+  equivocado (reproducido en `conversations`: un chat dual-role pidió switch + crear un
+  recordatorio en el mismo mensaje, el switch quedó bien en Cosmos, y el `upsert_reminder` del
+  mismo turno falló con "Tu rol (platform_admin) no tiene permiso" aunque el chat ya operaba el
+  otro negocio). `agent.run_agent` ahora detecta cuándo `switch_business`/`switch_to_platform_admin`
+  devuelven éxito (`_CONTEXT_SWITCH_TOOLS`) y llama `context.build_context` de nuevo con una
+  lectura fresca del chat antes de seguir el loop, reemplazando `ctx` (y el `system_prompt`, si no
+  vino fijado por el caller) para el resto del turno. `AgentResult` ahora carga `tenant_id`/`role`
+  del `ctx` con el que terminó el turno — `function_app.py` los usa para el registro de auditoría
+  en `conversations` en vez de los valores de ANTES del switch, para que el audit trail no quede
+  desincronizado con lo que realmente pasó.
 - **Aislamiento estructural, no solo un filtro de query**: `clients`, `finance` y `pqrs` están
   particionados por `/tenantId` en Cosmos DB. Un `read_item` con el `tenantId` equivocado como
   partition key no encuentra el documento aunque adivines el id exacto — no depende de que cada

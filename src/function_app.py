@@ -13,14 +13,12 @@ from typing import Any, List, Optional
 
 import azure.functions as func
 
-from george import telegram
+from george import context, telegram
 from george.agent import AgentResult, generate_reminder_message, generate_report_message, run_agent
 from george.config import estimate_cost_usd, settings
 from george.groq_stt import transcribe
-from george import roles
 from george.repositories import chats as chats_repo
 from george.repositories import conversations as conversations_repo
-from george.repositories import records as records_repo
 from george.repositories import reminders as reminders_repo
 from george.repositories import tenants as tenants_repo
 from george.repositories.cosmos import get_database
@@ -99,75 +97,6 @@ def telegram_webhook(req: func.HttpRequest, outMsg: func.Out[str]) -> func.HttpR
 # ---------------------------------------------------------------------------
 # Background processing of one inbound Telegram message.
 # ---------------------------------------------------------------------------
-def _resolve_role_and_tenant(
-    chat_id: str, chat: dict[str, Any]
-) -> tuple[Optional[str], Optional[str], Optional[dict[str, Any]], Optional[str]]:
-    """Returns (role, tenant_id, tenant, error_message). When error_message
-    is not None, the caller should send it to the chat and stop — the other
-    three fields are meaningless in that case.
-
-    A chat can belong to several tenants; this resolves which one the
-    conversation is operating against right now:
-      - isPlatformAdmin -> role=platform_admin, no tenant, UNLESS this chat
-        also has a membership of its own and explicitly switched into it
-        (activeTenantId set) — dual role, see tools/membership.py's
-        switch_business / switch_to_platform_admin. Default stays platform
-        mode; a platform_admin chat never auto-activates a business.
-      - No memberships -> not provisioned into any business yet.
-      - Exactly one membership -> auto-selected (and persisted), no
-        disambiguation needed — this keeps the common case frictionless.
-      - Several memberships, none active yet -> PENDING_SELECTION_ROLE; the
-        agent's job for this turn is just to ask which one and call
-        switch_business (see prompts.py / tools/membership.py).
-    """
-    if chat.get("isPlatformAdmin"):
-        active_tenant_id = chat.get("activeTenantId")
-        if active_tenant_id:
-            active_membership = chats_repo.get_membership(chat, active_tenant_id)
-            if active_membership is not None:
-                tenant = tenants_repo.get_active_tenant(active_membership["tenantId"])
-                if tenant is not None:
-                    return active_membership["role"], active_membership["tenantId"], tenant, None
-                # The switched-to tenant is gone/suspended — fall back to
-                # platform mode below rather than error out a platform_admin,
-                # who always has a valid identity to fall back to.
-        return roles.PLATFORM_ADMIN_ROLE, None, None, None
-
-    memberships = chat.get("memberships") or []
-    if not memberships:
-        return (
-            None,
-            None,
-            None,
-            "Tu chat no está asociado a ningún negocio todavía. Contacta al administrador de la plataforma.",
-        )
-
-    active_tenant_id = chat.get("activeTenantId")
-    active_membership = chats_repo.get_membership(chat, active_tenant_id) if active_tenant_id else None
-
-    if active_membership is None and len(memberships) == 1:
-        active_membership = memberships[0]
-        try:
-            chats_repo.set_active_tenant(chat_id, active_membership["tenantId"])
-        except ValueError:
-            logger.exception("process_update: failed to auto-set active tenant for chat %s", chat_id)
-
-    if active_membership is None:
-        return roles.PENDING_SELECTION_ROLE, None, None, None
-
-    tenant = tenants_repo.get_active_tenant(active_membership["tenantId"])
-    if tenant is None:
-        return (
-            None,
-            None,
-            None,
-            "El negocio activo de tu chat ya no está disponible (fue suspendido o eliminado). "
-            "Contacta al administrador de la plataforma.",
-        )
-
-    return active_membership["role"], active_membership["tenantId"], tenant, None
-
-
 def _history_to_messages(history_docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Turns stored `conversations` docs (inbound turns only) into an
     alternating user/assistant message list for the Anthropic API."""
@@ -201,25 +130,12 @@ def process_update(msg: func.QueueMessage) -> None:
         logger.warning("process_update: chat %s no longer authorized, dropping", chat_id)
         return
 
-    role, tenant_id, tenant, error_message = _resolve_role_and_tenant(chat_id, chat)
+    user_name = (message.get("from") or {}).get("first_name") or chat.get("name") or chat_id
+    ctx, error_message = context.build_context(chat_id, user_name, correlation_id, chat=chat)
     if error_message:
         logger.warning("process_update: chat %s could not resolve role/tenant: %s", chat_id, error_message)
         telegram.send_message(chat_id, error_message)
         return
-
-    record_types = tuple(records_repo.list_record_types(tenant_id)) if tenant_id else ()
-
-    user_name = (message.get("from") or {}).get("first_name") or chat.get("name") or chat_id
-    ctx = ToolContext(
-        chat_id=chat_id,
-        role=role,
-        user_name=user_name,
-        correlation_id=correlation_id,
-        tenant_id=tenant_id,
-        tenant=tenant,
-        is_platform_admin=bool(chat.get("isPlatformAdmin")),
-        record_types=record_types,
-    )
 
     telegram.send_chat_action(chat_id, "typing")
 
@@ -276,10 +192,14 @@ def process_update(msg: func.QueueMessage) -> None:
 
     conversations_repo.create_conversation(
         chat_id,
-        tenantId=tenant_id,
+        # From `result`, not the `ctx` built above: if the turn called
+        # switch_business/switch_to_platform_admin, ctx got refreshed
+        # mid-turn inside run_agent (see agent._CONTEXT_SWITCH_TOOLS) and
+        # this reflects where the conversation actually ended up.
+        tenantId=result.tenant_id,
         userId=str((message.get("from") or {}).get("id", chat_id)),
         userName=user_name,
-        role=role,
+        role=result.role,
         direction="inbound",
         input=input_record,
         output={"text": result.reply_text},

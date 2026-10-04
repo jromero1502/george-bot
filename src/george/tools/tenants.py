@@ -28,6 +28,23 @@ def _create_tenant(input_: dict[str, Any], ctx: ToolContext) -> str:
     # switch_business into it explicitly.
     owner_is_platform_admin = bool(existing_chat and existing_chat.get("isPlatformAdmin"))
 
+    # Real incident (2026-10-04): George proposed/attempted creating
+    # "Empanadas Andrés Romero" from scratch for a chat that was ALREADY
+    # owner of a tenant with that exact name — it never occurred to ask
+    # list_my_businesses/list_tenants first. Same shape of bug as creating a
+    # duplicate client (see tools/clients.py's search_clients-first rule),
+    # so same fix: check here too, not just in the prompt, since the prompt
+    # alone already failed once for the analogous log_record case.
+    for membership in (existing_chat or {}).get("memberships") or []:
+        existing_tenant = tenants_repo.get_tenant(membership["tenantId"])
+        if existing_tenant and existing_tenant.get("name", "").strip().lower() == input_["name"].strip().lower():
+            raise ToolError(
+                f"El chat {owner_chat_id} ya es {membership['role']!r} de un negocio llamado "
+                f"{existing_tenant['name']!r} (tenant_id={membership['tenantId']!r}). Si es el mismo negocio, "
+                "no crees uno nuevo — usa add_chat_to_tenant si falta asociar otro chat a ese mismo tenant, o "
+                "decile al usuario que pida switch_business desde su propio chat para operarlo."
+            )
+
     timezone = input_.get("timezone") or "America/Bogota"
     tenant = tenants_repo.create_tenant(
         name=input_["name"],
@@ -89,6 +106,36 @@ def _list_tenants(input_: dict[str, Any], ctx: ToolContext) -> str:
         for t in results
     ]
     return json.dumps({"tenants": slim}, ensure_ascii=False)
+
+
+def _get_chat_memberships(input_: dict[str, Any], ctx: ToolContext) -> str:
+    require_role(ctx, _ROLES, "get_chat_memberships")
+    target_chat_id = input_["chat_id"]
+    chat = chats_repo.get_chat(target_chat_id)
+    if chat is None:
+        raise ToolError(f"No existe ningún chat con chatId={target_chat_id!r}.")
+
+    memberships = []
+    for membership in chat.get("memberships") or []:
+        tenant = tenants_repo.get_tenant(membership["tenantId"])
+        memberships.append(
+            {
+                "tenantId": membership["tenantId"],
+                "role": membership.get("role"),
+                "name": tenant.get("name") if tenant else None,
+                "businessType": tenant.get("businessType") if tenant else None,
+                "status": tenant.get("status") if tenant else "desconocido",
+                "active": membership["tenantId"] == chat.get("activeTenantId"),
+            }
+        )
+    return json.dumps(
+        {
+            "chatId": target_chat_id,
+            "isPlatformAdmin": bool(chat.get("isPlatformAdmin")),
+            "memberships": memberships,
+        },
+        ensure_ascii=False,
+    )
 
 
 def _add_chat_to_tenant(input_: dict[str, Any], ctx: ToolContext) -> str:
@@ -197,7 +244,11 @@ TOOLS = [
     ),
     ToolSpec(
         name="list_tenants",
-        description="Lista los negocios (tenants) registrados en la plataforma.",
+        description=(
+            "Lista TODOS los negocios (tenants) registrados en la plataforma, sin filtrar por chat ni owner. "
+            "NUNCA asumas que esta lista (completa o parcial) pertenece a un chat específico que te preguntaron "
+            "— para eso usa get_chat_memberships."
+        ),
         input_schema={
             "type": "object",
             "properties": {"status": {"type": "string", "enum": ["active", "suspended"]}},
@@ -206,6 +257,22 @@ TOOLS = [
         },
         allowed_roles=_ROLES,
         handler=_list_tenants,
+    ),
+    ToolSpec(
+        name="get_chat_memberships",
+        description=(
+            "Dado un chatId, devuelve a qué negocios pertenece (tenantId, nombre, rol en cada uno, y cuál está "
+            "activo). Usala para responder 'a cuántos/cuáles negocios pertenece el chat X' — list_tenants no "
+            "tiene esa información."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {"chat_id": {"type": "string"}},
+            "required": ["chat_id"],
+            "additionalProperties": False,
+        },
+        allowed_roles=_ROLES,
+        handler=_get_chat_memberships,
     ),
     ToolSpec(
         name="add_chat_to_tenant",

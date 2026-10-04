@@ -1,8 +1,16 @@
-"""Tool for recalling a chat's OWN past conversation turns — e.g. "recupera
-la lista del martes". The automatic history fed into every turn
+"""Tool for recalling a TENANT's past conversation turns (across every chat
+that belongs to it, not just the one asking) — e.g. "recupera la lista del
+martes". The automatic history fed into every turn
 (function_app.py::_history_to_messages) is only the last HISTORY_TURNS
 turns, which scrolls past a given day fast on an active chat; this is how
 George reaches further back when a human explicitly asks him to.
+
+Originally scoped to the requesting chat's own messages only — widened
+after a real incident (2026-10-04): a second team member asked to recall a
+day she hadn't personally written in and got told "la conversación no
+quedó registrada", which read as data loss when it had simply been written
+by a teammate under a different chatId. See
+repositories/conversations.py::search_by_date for the query-level change.
 """
 from __future__ import annotations
 
@@ -45,9 +53,7 @@ def _recall_chat_history(input_: dict[str, Any], ctx: ToolContext) -> str:
     since_utc = _day_start_utc(since_date, tz_name)
     until_utc = _day_start_utc(until_date + timedelta(days=1), tz_name)
 
-    docs = conversations_repo.search_by_date(
-        ctx.chat_id, tenant_id, since_utc.isoformat(), until_utc.isoformat()
-    )
+    docs = conversations_repo.search_by_date(tenant_id, since_utc.isoformat(), until_utc.isoformat())
     turns = []
     for doc in docs:
         if doc.get("direction") != "inbound":
@@ -57,11 +63,20 @@ def _recall_chat_history(input_: dict[str, Any], ctx: ToolContext) -> str:
         assistant_text = (doc.get("output") or {}).get("text")
         if not user_text and not assistant_text:
             continue
-        turns.append({"ts": doc.get("ts"), "user": user_text, "george": assistant_text})
+        turns.append(
+            {
+                "ts": doc.get("ts"),
+                "chatId": doc.get("chatId"),
+                "who": doc.get("userName"),
+                "user": user_text,
+                "george": assistant_text,
+            }
+        )
 
     if not turns:
         return json.dumps(
-            {"turns": [], "note": "No hay mensajes de este chat en ese rango de fechas."}, ensure_ascii=False
+            {"turns": [], "note": "No hay mensajes de este negocio (en ningún chat) en ese rango de fechas."},
+            ensure_ascii=False,
         )
     return json.dumps({"turns": turns}, ensure_ascii=False)
 
@@ -70,13 +85,16 @@ TOOLS = [
     ToolSpec(
         name="recall_chat_history",
         description=(
-            "Trae los mensajes reales (tuyos y del usuario) de ESTE chat en una fecha o rango de fechas pasado "
-            "— usala cuando el usuario te pida recuperar, revisar o continuar algo de un dia anterior que ya no "
-            "aparece en tu historial normal de la conversacion (ej. 'recupera la lista del martes', 'que paso el "
-            "lunes con...'). Devuelve el texto tal cual se dijo en ese momento; no inventes ni asumas nada que no "
-            "este ahi textualmente. Despues de leerlo, cruzalo con search_records/search_finance/summarize_records "
-            "segun corresponda para ver que de eso quedo efectivamente guardado y que no, mostrale al usuario lo "
-            "que falta, y recien despues de que confirme cargalo (log_record, create_charge, etc.) de a uno."
+            "Trae los mensajes reales (de cualquier chat de ESTE negocio, no solo el tuyo) en una fecha o rango de "
+            "fechas pasado — usala cuando el usuario te pida recuperar, revisar o continuar algo de un dia "
+            "anterior que ya no aparece en tu historial normal de la conversacion (ej. 'recupera la lista del "
+            "martes', 'que paso el lunes con...'). Si el usuario que pregunta no es quien escribio esos mensajes "
+            "originalmente (ej. otro miembro del equipo), los va a encontrar igual — es historial del negocio, no "
+            "privado de cada chat. Devuelve el texto tal cual se dijo en ese momento; no inventes ni asumas nada "
+            "que no este ahi textualmente. Despues de leerlo, cruzalo con "
+            "search_records/search_finance/summarize_records segun corresponda para ver que de eso quedo "
+            "efectivamente guardado y que no, mostrale al usuario lo que falta, y recien despues de que confirme "
+            "cargalo (log_record, create_charge, etc.) de a uno."
         ),
         input_schema={
             "type": "object",

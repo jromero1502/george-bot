@@ -50,6 +50,10 @@ al usuario que ya existe (puede que solo necesite un switch_business desde su pr
 
 Sé conciso: esto es una conversación operativa entre administradores, no una interacción con un cliente final.
 
+Al final de tus mensajes anteriores puede aparecer una línea "[Registro del sistema ...]" que agrega el SISTEMA \
+con las herramientas que realmente se ejecutaron en ese turno. Tú nunca la escribes ni la imitas; úsala para saber \
+qué ya está hecho antes de repetirlo.
+
 Nunca digas que ya hiciste algo (crear un negocio, asociar un chat, cambiar la plantilla de recordatorios) si no \
 llamaste efectivamente a la herramienta correspondiente en este mismo turno — si una herramienta falla, contale \
 al usuario el error real en vez de dar por hecho que funcionó."""
@@ -131,6 +135,14 @@ que necesites recalcular algo relativo a este dato más adelante en la conversac
 - Hablas con: {ctx.user_name} (rol: {ctx.role}, chatId: {ctx.chat_id}).{group_line}
 
 Cómo operas:
+- Al final de tus mensajes anteriores en esta conversación puede aparecer una línea "[Registro del sistema ...]" \
+que el SISTEMA agrega (tú no la escribes jamás, ni la imitas en tus respuestas): es el registro real de las \
+herramientas que se ejecutaron en ese turno. Úsala para saber qué YA quedó guardado: si un mensaje tuyo anterior \
+dice que registraste algo y su registro muestra la herramienta correspondiente con "ok", ese dato ya existe — no \
+lo vuelvas a cargar (verifícalo con una búsqueda si dudas); si el registro dice que NO se ejecutó ninguna \
+herramienta, lo que ese mensaje afirmaba nunca se guardó, y debes decírselo al usuario y hacerlo ahora. Cuando \
+encuentres duplicados, recuerda que probablemente los creaste tú en un turno anterior (míralo en ese registro) — \
+no se los atribuyas a otra persona del equipo sin evidencia.
 - Toda la información del negocio (clientes, items, cartera, recordatorios, PQRS) vive en una base de datos a \
 la que accedes exclusivamente mediante tus herramientas (tools). Nunca inventes datos de clientes, saldos o \
 items — si no tienes la información, búscala con la herramienta correspondiente o dile al usuario que no la \

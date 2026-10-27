@@ -16,6 +16,7 @@ import anthropic
 from george import context
 from george.config import settings
 from george.prompts import build_system_prompt
+from george.tool_log import CONFIRMATION_RE, strip_tool_log
 from george.tools import registry
 from george.tools.common import ToolContext
 
@@ -42,10 +43,7 @@ _CHAT_MAX_TOKENS = 4096
 # from 2026-10-04): a turn that ends with zero tool calls and text matching
 # this is treated as suspect and gets one corrective round-trip, grounded in
 # whether a tool call actually happened, before it ever reaches the user.
-_CONFIRMATION_RE = re.compile(
-    r"(anot[ée]|anotad[oa]s?|registr[ée]|registrad[oa]s?|guard[ée]|guardad[oa]s?|carg[uqé]|cargad[oa]s?|✅|✓)",
-    re.IGNORECASE,
-)
+_CONFIRMATION_RE = CONFIRMATION_RE  # defined in tool_log.py, shared with the history builder
 _VERIFY_NUDGE = (
     "[Verificación automática] Tu respuesta anterior suena a que ya guardaste, registraste o cargaste algo, pero "
     "no llamaste ninguna herramienta en este turno. Si corresponde guardar algo, hacé la llamada a la herramienta "
@@ -303,6 +301,7 @@ def run_agent(
     reply_text = ""
     if response is not None:
         reply_text = next((b.text for b in response.content if b.type == "text"), "")
+    reply_text = strip_tool_log(reply_text)
     if not reply_text:
         reply_text = (
             "Listo, hice los cambios pero no tengo un resumen para darte."

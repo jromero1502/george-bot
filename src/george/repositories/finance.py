@@ -202,3 +202,11 @@ def add_comment(tenant_id: str, movement_id: str, by: str, text: str) -> dict[st
     movement.setdefault("comments", []).append({"by": by, "at": utc_now_iso(), "text": text})
     movement["updatedAt"] = utc_now_iso()
     return _container().upsert_item(movement)
+
+
+def delete_movement(tenant_id: str, movement_id: str) -> bool:
+    try:
+        _container().delete_item(item=movement_id, partition_key=tenant_id)
+        return True
+    except exceptions.CosmosResourceNotFoundError:
+        return False

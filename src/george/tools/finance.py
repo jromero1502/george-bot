@@ -152,6 +152,35 @@ def _add_finance_comment(input_: dict[str, Any], ctx: ToolContext) -> str:
     return json.dumps({"id": movement["id"], "comments": len(movement.get("comments", []))})
 
 
+def _delete_finance_entry(input_: dict[str, Any], ctx: ToolContext) -> str:
+    require_role(ctx, _ROLES, "delete_finance_entry")
+    tenant_id = require_tenant(ctx)
+    entry_id = input_["entry_id"]
+    movement = finance_repo.get_movement(tenant_id, entry_id)
+    if movement is None:
+        raise ToolError(f"No existe un movimiento con id={entry_id!r} en este negocio. Búscalo con search_finance.")
+    # Only expenses: a charge's balance is reduced by the payments applied to it
+    # (register_payment), so deleting either one would silently corrupt a client's
+    # saldo. An expense never touches a balance (get_client_balance sums charges
+    # only), which is what makes it safe to remove.
+    if movement.get("type") != "expense":
+        raise ToolError(
+            f"Solo se pueden eliminar gastos. Este movimiento es de tipo {movement.get('type')!r}: los cobros y "
+            "pagos afectan el saldo del cliente, así que no se borran con esta herramienta."
+        )
+    finance_repo.delete_movement(tenant_id, entry_id)
+    return json.dumps(
+        {
+            "deleted": True,
+            "id": entry_id,
+            "concept": movement.get("concept"),
+            "amount": movement.get("amount"),
+            "period": movement.get("period"),
+        },
+        ensure_ascii=False,
+    )
+
+
 TOOLS = [
     ToolSpec(
         name="search_finance",
@@ -253,5 +282,23 @@ TOOLS = [
         },
         allowed_roles=_ROLES,
         handler=_add_finance_comment,
+    ),
+    ToolSpec(
+        name="delete_finance_entry",
+        description=(
+            "Elimina un GASTO (create_expense) — típicamente un duplicado (el mismo gasto cargado dos veces) o una "
+            "carga equivocada. No sirve para cobros ni pagos de clientes. Busca el id con search_finance (type=expense) "
+            "y, si hay varios parecidos, confirma con el usuario cuál sobra antes de borrar; mira el registro de "
+            "herramientas del historial para saber si el duplicado lo creaste tú en un turno anterior. Borrar es "
+            "irreversible."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {"entry_id": {"type": "string", "description": "id del gasto, tal cual lo devuelve search_finance"}},
+            "required": ["entry_id"],
+            "additionalProperties": False,
+        },
+        allowed_roles=_ROLES,
+        handler=_delete_finance_entry,
     ),
 ]

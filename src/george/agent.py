@@ -330,7 +330,10 @@ def generate_reminder_message(instruction: str, tenant: Optional[dict[str, Any]]
     client = _get_client()
     response = client.messages.create(
         model=settings.anthropic_model,
-        max_tokens=300,
+        # Haiku 5.5 thinks by default and thinking counts toward max_tokens: with
+        # the old 300 it could spend the whole budget before writing any text, and
+        # the `or instruction` fallback below would send the raw instruction.
+        max_tokens=2000,
         system=_reminder_system_prompt(tenant),
         messages=[{"role": "user", "content": instruction}],
     )

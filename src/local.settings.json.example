@@ -14,7 +14,7 @@
 
     "ANTHROPIC_API_KEY": "sk-ant-REPLACE_ME",
     "GROQ_API_KEY": "gsk-REPLACE_ME",
-    "ANTHROPIC_MODEL": "claude-haiku-4-5",
+    "ANTHROPIC_MODEL": "claude-haiku-5-5",
 
     "DEFAULT_TIMEZONE": "America/Bogota",
     "PLATFORM_ADMIN_CHAT_ID": "111111111",

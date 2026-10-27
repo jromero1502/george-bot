@@ -30,7 +30,7 @@
       "value": "REPLACE_ME"
     },
     "anthropicModel": {
-      "value": "claude-haiku-4-5"
+      "value": "claude-haiku-5-5"
     },
     "defaultTimezone": {
       "value": "America/Bogota"

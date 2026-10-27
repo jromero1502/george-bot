@@ -64,6 +64,18 @@ def telegram_webhook(req: func.HttpRequest, outMsg: func.Out[str]) -> func.HttpR
         return func.HttpResponse(status_code=200)
 
     chat_id = str(message["chat"]["id"])
+
+    # Answered before the whitelist on purpose: the platform_admin needs the id
+    # of a brand-new group to enable it, and by definition it isn't listed yet.
+    # Exposes nothing the person asking can't already see in Telegram.
+    command = (message.get("text") or "").strip().split(maxsplit=1)[0].split("@")[0].lower() if message.get("text") else ""
+    if command == "/chatid":
+        try:
+            telegram.send_message(chat_id, f"chatId: {chat_id}", reply_to_message_id=message.get("message_id"))
+        except Exception:
+            logger.exception("telegram_webhook: failed to answer /chatid in chat %s", chat_id)
+        return func.HttpResponse(status_code=200)
+
     if chats_repo.is_authorized(chat_id) is None:
         logger.info("telegram_webhook: chat %s is not on the whitelist, dropping", chat_id)
         # Still 200: Telegram would otherwise retry delivery of an update we
@@ -98,9 +110,15 @@ def telegram_webhook(req: func.HttpRequest, outMsg: func.Out[str]) -> func.HttpR
 # ---------------------------------------------------------------------------
 # Background processing of one inbound Telegram message.
 # ---------------------------------------------------------------------------
-def _history_to_messages(history_docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _as_speaker(user_name: Optional[str], text: str) -> str:
+    return f"[{user_name or 'alguien'}]: {text}"
+
+
+def _history_to_messages(history_docs: list[dict[str, Any]], group: bool = False) -> list[dict[str, Any]]:
     """Turns stored `conversations` docs (inbound turns only) into an
-    alternating user/assistant message list for the Anthropic API."""
+    alternating user/assistant message list for the Anthropic API. In a group
+    several people share the history, so each user turn is tagged with who said
+    it (see process_update) — otherwise George can't tell them apart."""
     messages: list[dict[str, Any]] = []
     for doc in history_docs:
         if doc.get("direction") == "outbound":
@@ -108,7 +126,7 @@ def _history_to_messages(history_docs: list[dict[str, Any]]) -> list[dict[str, A
         user_text = (doc.get("input") or {}).get("transcript") or (doc.get("input") or {}).get("text")
         assistant_text = (doc.get("output") or {}).get("text")
         if user_text:
-            messages.append({"role": "user", "content": user_text})
+            messages.append({"role": "user", "content": _as_speaker(doc.get("userName"), user_text) if group else user_text})
         if assistant_text:
             messages.append({"role": "assistant", "content": assistant_text})
     return messages
@@ -217,9 +235,11 @@ def process_update(msg: func.QueueMessage) -> None:
         return
 
     history_docs = conversations_repo.get_recent(chat_id, settings.history_turns)
-    history_messages = _history_to_messages(history_docs)
+    in_group = telegram.is_group_chat(chat_id)
+    history_messages = _history_to_messages(history_docs, group=in_group)
 
-    result = run_agent(ctx, history_messages, user_text)
+    # input_record above keeps the raw text; only what the model sees is tagged.
+    result = run_agent(ctx, history_messages, _as_speaker(user_name, user_text) if in_group else user_text)
 
     telegram.send_message(chat_id, result.reply_text, reply_to_message_id=message.get("message_id"))
 

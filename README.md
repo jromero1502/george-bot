@@ -229,7 +229,7 @@ sin `--demo-tenant-*`); los negocios reales se crean conversando con George como
 | `COSMOS_ENDPOINT`, `COSMOS_DATABASE` | Cosmos DB. Sin `COSMOS_KEY` en Azure — se usa la identidad administrada. |
 | `COSMOS_KEY` | Solo local, contra el emulador. |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_WEBHOOK_PATH` | Telegram. El secreto real es el header `X-Telegram-Bot-Api-Secret-Token`; la function key y el path son capas adicionales. |
-| `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Claude Haiku (`claude-haiku-4-5` por defecto). |
+| `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Claude Haiku (`claude-haiku-5-5` por defecto). |
 | `GROQ_API_KEY`, `GROQ_STT_MODEL` | Whisper (`whisper-large-v3-turbo` por defecto). |
 | `DOCUMENT_INTELLIGENCE_ENDPOINT` | OCR de fotos (Azure AI Document Intelligence, modelo `prebuilt-read`). Sin key — se usa la identidad administrada, igual que Cosmos. |
 | `DEFAULT_TIMEZONE` | Fallback cuando un tenant no especifica su propia zona horaria. |

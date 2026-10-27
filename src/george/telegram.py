@@ -31,6 +31,13 @@ def _post(method: str, json: dict[str, Any]) -> dict[str, Any]:
         return response.json()
 
 
+def is_group_chat(chat_id: str) -> bool:
+    """Telegram gives private chats a positive id (the user's) and groups,
+    supergroups and channels a negative one — so the id alone says whether
+    several people share this conversation, no extra field needed."""
+    return str(chat_id).startswith("-")
+
+
 def verify_webhook_secret(header_value: Optional[str]) -> bool:
     """Constant-time comparison of the X-Telegram-Bot-Api-Secret-Token header
     against TELEGRAM_WEBHOOK_SECRET. This is the actual auth boundary of the

@@ -44,7 +44,7 @@ class Settings:
 
     # LLM providers
     anthropic_api_key: str = field(default_factory=lambda: _env("ANTHROPIC_API_KEY", required=True))
-    anthropic_model: str = field(default_factory=lambda: _env("ANTHROPIC_MODEL", "claude-haiku-4-5"))
+    anthropic_model: str = field(default_factory=lambda: _env("ANTHROPIC_MODEL", "claude-haiku-5-5"))
     groq_api_key: str = field(default_factory=lambda: _env("GROQ_API_KEY", required=True))
     groq_stt_model: str = field(default_factory=lambda: _env("GROQ_STT_MODEL", "whisper-large-v3-turbo"))
 
@@ -75,14 +75,19 @@ class Settings:
 
 settings = Settings()
 
-# Anthropic pricing for claude-haiku-4-5, per the claude-api skill's cached
-# model table (USD per million tokens). Used only to estimate costUsd on
-# audit records — not billed against, so a stale constant here is low-risk.
-HAIKU_INPUT_USD_PER_MTOK = 1.00
-HAIKU_OUTPUT_USD_PER_MTOK = 5.00
+# Anthropic list prices (USD per million tokens: input, output), per the
+# claude-api skill's cached model table. Used only to estimate costUsd on audit
+# records — not billed against, so a stale constant here is low-risk. Haiku 5.5
+# is the <=100K-prompt rate card ($0.50/$2.50 beyond that; George's prompts are
+# ~15-35K tokens).
+MODEL_PRICES_USD_PER_MTOK: dict[str, tuple[float, float]] = {
+    "claude-haiku-4-5": (1.00, 5.00),
+    "claude-haiku-5-5": (0.10, 0.50),
+    "claude-sonnet-5-5": (2.00, 10.00),
+}
+_FALLBACK_PRICES = MODEL_PRICES_USD_PER_MTOK["claude-haiku-5-5"]
 
 
-def estimate_cost_usd(input_tokens: int, output_tokens: int) -> float:
-    return (input_tokens / 1_000_000) * HAIKU_INPUT_USD_PER_MTOK + (
-        output_tokens / 1_000_000
-    ) * HAIKU_OUTPUT_USD_PER_MTOK
+def estimate_cost_usd(input_tokens: int, output_tokens: int, model: str | None = None) -> float:
+    input_price, output_price = MODEL_PRICES_USD_PER_MTOK.get(model or settings.anthropic_model, _FALLBACK_PRICES)
+    return (input_tokens / 1_000_000) * input_price + (output_tokens / 1_000_000) * output_price

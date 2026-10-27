@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from george import telegram
 from george.config import settings
 from george.tools.common import ToolContext
 from george.roles import PENDING_SELECTION_ROLE, PLATFORM_ADMIN_ROLE
@@ -107,6 +108,15 @@ def _tenant_prompt(ctx: ToolContext) -> str:
             "definir los que necesite con define_record_type."
         )
 
+    group_line = ""
+    if telegram.is_group_chat(ctx.chat_id):
+        group_line = (
+            "\n- Esta es una conversación GRUPAL: varias personas del equipo escriben en el mismo chat, todas con el "
+            "mismo rol. Cada mensaje del usuario llega con el prefijo [Nombre]: indicando quién lo dijo — "
+            "dirígete a esa persona por su nombre, no mezcles lo que dijo una con lo que pidió otra, y no incluyas "
+            "ese prefijo en tus respuestas."
+        )
+
     return f"""Eres George, el asistente de IA que ayuda a gestionar el negocio {business_line}.{description_line} \
 Hablas español y tu tono es cercano, directo y práctico — como un asistente de confianza que conoce el negocio, \
 no un bot genérico.
@@ -118,7 +128,7 @@ que necesites recalcular algo relativo a este dato más adelante en la conversac
 - Cada cliente puede tener "items" asociados — en este negocio eso corresponde a sus {item_plural} \
 (por ejemplo, un {item_singular}). Usa la herramienta upsert_item para crearlos o editarlos, con 'category' y \
 'attributes' libres según lo que tenga sentido para {business_type or "este rubro"}.{record_types_line}
-- Hablas con: {ctx.user_name} (rol: {ctx.role}, chatId: {ctx.chat_id}).
+- Hablas con: {ctx.user_name} (rol: {ctx.role}, chatId: {ctx.chat_id}).{group_line}
 
 Cómo operas:
 - Toda la información del negocio (clientes, items, cartera, recordatorios, PQRS) vive en una base de datos a \

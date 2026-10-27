@@ -127,6 +127,21 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
   del `ctx` con el que terminó el turno — `function_app.py` los usa para el registro de auditoría
   en `conversations` en vez de los valores de ANTES del switch, para que el audit trail no quede
   desincronizado con lo que realmente pasó.
+- **Convención preferida: un grupo de Telegram por negocio, no un chat privado con varias
+  memberships.** Los cambios de contexto (`switch_business`) funcionaron mal en la práctica, así que
+  cada negocio vive en su propio grupo: el `chatId` del grupo (negativo, `telegram.is_group_chat`)
+  se habilita con `create_tenant`/`add_chat_to_tenant` y tiene UNA sola membership, así que se
+  autoselecciona y nunca pasa por `PENDING_SELECTION_ROLE`. El rol lo da el grupo, no la persona:
+  cualquiera dentro del grupo opera con el mismo rol (decisión explícita — para un rol menor se usa
+  otro grupo). La whitelist sigue siendo de *chats*: sin ella cualquiera podría agregar el bot a un
+  grupo propio. Detalles que salen de ahí: (1) `/chatid` se responde en `telegram_webhook` ANTES del
+  chequeo de whitelist, para que el platform_admin pueda obtener el id de un grupo nuevo; (2) George
+  responde a todos los mensajes del grupo, y como varias personas comparten el historial, cada turno
+  se etiqueta `[Nombre]:` (solo lo que ve el modelo, `input_record` guarda el texto crudo;
+  `_history_to_messages(group=True)` hace lo mismo con el historial); (3) el bot necesita *privacy
+  mode* desactivado en BotFather (y re-agregarlo al grupo) o no ve mensajes que no sean comandos;
+  (4) si un grupo se convierte en supergrupo Telegram le cambia el id — hay que re-habilitar el nuevo.
+  Los chats privados con varias memberships siguen funcionando (legado).
 - **Aislamiento estructural, no solo un filtro de query**: `clients`, `finance` y `pqrs` están
   particionados por `/tenantId` en Cosmos DB. Un `read_item` con el `tenantId` equivocado como
   partition key no encuentra el documento aunque adivines el id exacto — no depende de que cada
@@ -286,10 +301,22 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
   interceptar cada `tool_use` para el gating por rol y para escribir el registro de auditoría
   (tokens, latencia, resultado) por cada llamada — el runner del SDK esconde ese punto de
   inspección.
-- **Sin `budget_tokens`/thinking ni `effort` en las llamadas a Haiku.** `claude-haiku-4-5` no
-  soporta adaptive thinking (usa el formato viejo `{"type":"enabled","budget_tokens":N}`) y
-  `output_config.effort` da error en este modelo. No se necesita razonamiento profundo para
-  extracción + tool calling, así que se omiten ambos parámetros.
+- **Modelo por defecto: `claude-haiku-5-5` (desde 2026-10-26), antes `claude-haiku-4-5`.** Se
+  cambió tras medir ambos con `scripts/eval_models.py` (mismo system prompt y tools que
+  producción, tools simuladas): con un historial que ya contenía dos "✅ Anotado" sin tool, Haiku
+  4.5 volvió a inventar la confirmación 16 de 18 veces; Haiku 5.5 0 de 18 (y Sonnet 5.5 tampoco,
+  pero preguntando más y a ~19x el costo). Es el mismo patrón de contagio de producción (tras un
+  turno así, el siguiente lo repite ~67%). Muestra chica y sintética, sin el backstop
+  `_VERIFY_NUDGE` — no reemplaza arreglar el historial. El modelo desplegado sale de la variable
+  `ANTHROPIC_MODEL` del environment `production` de GitHub (la lee `deploy.yml`), NO del default de
+  `config.py`/Bicep: cambiarla solo tiene efecto cuando corre el job `infra`. Diferencias a tener
+  presentes con 5.5: **razona por defecto** (adaptive thinking, effort `medium`) y ese
+  razonamiento cuenta dentro de `max_tokens` — por eso `generate_reminder_message` usa 2000, no
+  300; el loop de `run_agent` ya devuelve `response.content` completo al historial (los modelos
+  5.x exigen reenviar los bloques de thinking intactos) y lee el texto por `type`, no por
+  posición; no se envían `temperature`/`top_p`/`top_k` (dan 400 en 5.5); no hay prefill. Precios
+  por modelo para `costUsd` en `config.MODEL_PRICES_USD_PER_MTOK`; el tokenizador de 5.5 cuenta
+  ~30% más tokens para el mismo texto.
 - **`reminders` tiene partition key `/id`** (cada documento es su propia partición lógica) —
   ver "Modelo multi-tenant" arriba para el porqué (el scheduler escanea cross-tenant).
 - **Avance de `nextRunAt` con ETag (`try_claim_and_advance` en `repositories/reminders.py`)**

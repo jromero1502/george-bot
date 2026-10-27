@@ -35,7 +35,7 @@ param documentIntelligenceSku string = 'S0'
 @description('Telegram chatId of the platform operator — seeded with role=platform_admin, receives poison-queue alerts, and is the only role that can create new tenants (businesses) via the create_tenant tool')
 param platformAdminChatId string
 
-param anthropicModel string = 'claude-haiku-4-5'
+param anthropicModel string = 'claude-haiku-5-5'
 
 param defaultTimezone string = 'America/Bogota'
 

@@ -24,6 +24,7 @@ from george.repositories import reminders as reminders_repo
 from george.repositories import tenants as tenants_repo
 from george.repositories.cosmos import get_database
 from george.scheduling import next_state_after_fire
+from george.tool_log import format_tool_log
 from george.tools.common import ToolContext
 from george.util import new_id, utc_now, utc_now_iso
 
@@ -128,7 +129,10 @@ def _history_to_messages(history_docs: list[dict[str, Any]], group: bool = False
         if user_text:
             messages.append({"role": "user", "content": _as_speaker(doc.get("userName"), user_text) if group else user_text})
         if assistant_text:
-            messages.append({"role": "assistant", "content": assistant_text})
+            # What the tools REALLY did in this turn — see tool_log.py for why the
+            # plain reply text isn't enough for the model to go on.
+            tool_log = format_tool_log(doc.get("toolCalls"), assistant_text)
+            messages.append({"role": "assistant", "content": assistant_text + tool_log})
     return messages
 
 

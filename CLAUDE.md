@@ -245,6 +245,27 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
      tool realmente devolvió. Deliberadamente mecánico en vez de una instrucción más larga: una
      regla de texto ya falló dos veces con este exacto failure mode, así que la verificación no
      puede depender de que el modelo se acuerde de aplicarla.
+- **El historial que ve el modelo incluye un registro de las herramientas que REALMENTE
+  corrieron en cada turno (`tool_log.py`) — bug real del 2026-10-26, la otra cara de la
+  alucinación de "anotado".** `_history_to_messages` reenviaba solo el texto de cada turno, sin
+  las tool calls, así que un turno que de verdad llamó `create_expense` ×7 era indistinguible de
+  uno donde el modelo solo lo dijo. En un chat de mercado: George cargó 7 gastos ("Registré los 7
+  gastos", correcto), dos minutos después el usuario preguntó "¿me confirmas que quedó
+  registrado?" y George, sin evidencia en el historial de que hubiera pasado, los **volvió a
+  crear** (7 duplicados, $90.080 → $180.160) y luego los atribuyó a "otra persona del equipo".
+  Ahora cada turno del asistente lleva al final una línea `[Registro del sistema — herramientas
+  ejecutadas ...]` armada desde `toolCalls` (nombre, input truncado, ok/ERROR), y un turno que
+  suena a confirmación pero no ejecutó nada lleva una línea que dice que NO se guardó nada. La
+  línea se agrega solo al armar el historial — nunca se guarda en `output.text` — y
+  `agent.run_agent` la quita (`strip_tool_log`) de cualquier respuesta por si el modelo la imita.
+  Es la misma defensa, mecánica y no de prompt, que el backstop `_VERIFY_NUDGE`, pero aplicada
+  al turno SIGUIENTE. `CONFIRMATION_RE` vive en `tool_log.py` (agent.py la reimporta).
+- **`delete_finance_entry` solo borra gastos (`type == 'expense'`), a propósito.** Un cobro
+  tiene `balance` que `register_payment` va reduciendo; borrar el cobro o un pago de por medio
+  dejaría el saldo del cliente inconsistente sin que nada lo avise. Un gasto nunca entra en
+  `get_client_balance`, así que es seguro. Antes no existía ninguna herramienta de borrado para
+  `finance` (solo `delete_record` para registros propios y `delete_reminder`), y George mandaba
+  al usuario a "un panel del sistema" que no existe.
 - **`PLATFORM_ADMIN_CHAT_ID`** (antes `OWNER_CHAT_ID`) es el chat que recibe alertas de la cola
   envenenada y el que se siembra con `isPlatformAdmin: true` — ya no es "el dueño del negocio",
   es el operador de toda la plataforma.

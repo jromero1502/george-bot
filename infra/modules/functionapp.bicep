@@ -33,6 +33,9 @@ param groqApiKey string
 @description('Document Intelligence endpoint for OCR on Telegram photos — no key app setting, auth is via the Function App\'s managed identity (see resources.bicep\'s role assignment)')
 param documentIntelligenceEndpoint string
 
+@description('Key Vault with per-tenant Google OAuth credentials; read through the Function App managed identity (role granted manually, see CLAUDE.md)')
+param keyVaultUri string
+
 param anthropicModel string = 'claude-haiku-5-5'
 
 param defaultTimezone string = 'America/Bogota'
@@ -133,6 +136,10 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         {
           name: 'DOCUMENT_INTELLIGENCE_ENDPOINT'
           value: documentIntelligenceEndpoint
+        }
+        {
+          name: 'KEY_VAULT_URI'
+          value: keyVaultUri
         }
         {
           name: 'ANTHROPIC_MODEL'

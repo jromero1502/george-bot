@@ -56,6 +56,11 @@ class Settings:
         default_factory=lambda: _env("DOCUMENT_INTELLIGENCE_ENDPOINT", required=True)
     )
 
+    # Key Vault holding per-tenant Google OAuth credentials (george/google_auth.py).
+    # Optional: empty makes the Google tools say "not configured" rather than
+    # breaking startup. Same managed-identity-only auth as Cosmos.
+    key_vault_uri: str = field(default_factory=lambda: _env("KEY_VAULT_URI"))
+
     # Multi-tenant platform
     default_timezone: str = field(default_factory=lambda: _env("DEFAULT_TIMEZONE", "America/Bogota"))
     # The platform operator's chat — role=platform_admin in `chats`, receives

@@ -87,5 +87,7 @@ output functionAppHostName string = resources.outputs.functionAppHostName
 output cosmosEndpoint string = resources.outputs.cosmosEndpoint
 output cosmosDatabaseName string = resources.outputs.cosmosDatabaseName
 output documentIntelligenceEndpoint string = resources.outputs.documentIntelligenceEndpoint
+output keyVaultName string = resources.outputs.keyVaultName
+output keyVaultUri string = resources.outputs.keyVaultUri
 output storageAccountName string = resources.outputs.storageAccountName
 output telegramWebhookUrl string = resources.outputs.telegramWebhookUrl

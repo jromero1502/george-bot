@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 import anthropic
 
-from george import context
+from george import business_rules, context
 from george.config import settings
 from george.prompts import build_system_prompt
 from george.tool_log import CONFIRMATION_RE, strip_tool_log
@@ -68,6 +68,19 @@ _CONTEXT_SWITCH_TOOLS = ("switch_business", "switch_to_platform_admin")
 # ctx.role='owner' to be able to read every record type.
 _REPORT_TOOL_NAMES = ("list_record_types", "search_records", "summarize_records")
 
+# Persistent prompt injection guard. Business rules are appended to the system
+# prompt of EVERY future conversation of the tenant, and email bodies are text
+# written by strangers. So once a turn has read mail, it may not touch the
+# rules: a hostile email could otherwise plant a permanent instruction. The
+# owner just repeats the request in a message of their own. Mechanical, not a
+# prompt rule, for the same reason as _VERIFY_NUDGE.
+_UNTRUSTED_CONTENT_TOOLS = ("gmail_search", "gmail_read")
+_PERSISTENT_INSTRUCTION_TOOLS = ("add_business_rule", "update_business_rule", "delete_business_rule")
+_TAINTED_TURN_MESSAGE = (
+    "Bloqueado: en este turno ya leíste correos (contenido de terceros), así que no puedes modificar las reglas "
+    "permanentes del negocio. Pídele al owner que repita la solicitud en un mensaje aparte."
+)
+
 
 def _reminder_system_prompt(tenant: Optional[dict[str, Any]]) -> str:
     tenant = tenant or {}
@@ -79,6 +92,7 @@ def _reminder_system_prompt(tenant: Optional[dict[str, Any]]) -> str:
         "natural en espanol, siguiendo la instruccion que recibas. "
         "No agregues saludos genericos ('Hola equipo') salvo que la instruccion lo pida explicitamente. "
         "Responde unicamente con el texto del mensaje final, sin comillas ni explicaciones sobre lo que hiciste."
+        + business_rules.render_block(tenant)
     )
 
 
@@ -128,7 +142,12 @@ def _dispatch_tool_use_blocks(
         if block.type != "tool_use":
             continue
         call_start = time.monotonic()
-        result_text, is_error = registry.dispatch(block.name, block.input, ctx, only=tool_names)
+        if block.name in _PERSISTENT_INSTRUCTION_TOOLS and any(
+            c["name"] in _UNTRUSTED_CONTENT_TOOLS for c in tool_calls_log
+        ):
+            result_text, is_error = _TAINTED_TURN_MESSAGE, True
+        else:
+            result_text, is_error = registry.dispatch(block.name, block.input, ctx, only=tool_names)
         call_latency_ms = (time.monotonic() - call_start) * 1000
         tool_calls_log.append(
             {
@@ -351,6 +370,7 @@ def _report_system_prompt(tenant: Optional[dict[str, Any]]) -> str:
         "list_record_types, search_records y/o summarize_records — nunca inventes numeros. Si la instruccion "
         "menciona un tipo de registro que no existe en este negocio, decilo en vez de inventar datos. "
         "Responde unicamente con el texto final del reporte, sin comillas ni explicaciones sobre lo que hiciste."
+        + business_rules.render_block(tenant)
     )
 
 

@@ -11,10 +11,10 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from george.tools import chats, clients, finance, history, membership, pqrs, records, reminders, tenants, utility
+from george.tools import business_rules, chats, clients, finance, google, history, membership, pqrs, records, reminders, tenants, utility
 from george.tools.common import ToolContext, ToolError, ToolSpec
 
-_MODULES = (utility, clients, finance, records, reminders, pqrs, chats, tenants, membership, history)
+_MODULES = (utility, clients, finance, records, reminders, pqrs, chats, tenants, membership, history, google, business_rules)
 
 ALL_TOOLS: list[ToolSpec] = [tool for module in _MODULES for tool in module.TOOLS]
 _BY_NAME: dict[str, ToolSpec] = {tool.name: tool for tool in ALL_TOOLS}

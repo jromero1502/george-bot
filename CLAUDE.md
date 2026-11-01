@@ -300,6 +300,65 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
   Sin este paso, `george/document_intelligence.py` falla con un error de autorización la primera
   vez que llega una foto — no es un bug de código, es este permiso faltante.
 
+- **Google (Gmail solo lectura + Calendar/Meet) para cuentas personales @gmail — credenciales por
+  tenant en Key Vault, cargadas a mano.** `tools/google.py` (owner/admin): `gmail_search`,
+  `gmail_read`, `calendar_list_events/create_event/update_event/delete_event` (calendario
+  `primary`; Meet = `add_meet=true` → `conferenceData.createRequest`). `google_auth.py` lee el secreto
+  `google-<tenantId>` (JSON `{"client_id","client_secret","refresh_token"}`), canjea el refresh token
+  por un access token y lo cachea solo en memoria. La clave es el **tenant activo** (`ctx.tenant_id`),
+  no el chat: con la convención de un grupo por negocio son equivalentes, y así también funciona para
+  chats privados con varias memberships. El modelo nunca elige de quién es el buzón.
+  - **Alta de un negocio (manual, a propósito):** (1) en Google Cloud, un proyecto con las APIs Gmail y
+    Calendar habilitadas y un cliente OAuth; (2) generar el refresh token con scopes
+    `gmail.readonly` + `calendar.events` (ej. OAuth Playground con credenciales propias);
+    (3) `az keyvault secret set --vault-name <kv> --name google-<tenantId> --value '{...}'`.
+    **La pantalla de consentimiento debe estar "In production", no "Testing"**: en Testing Google vence el
+    refresh token a los 7 días (`invalid_grant`, que `google_auth` reporta con ese motivo). Para uso en
+    la propia cuenta, la app sin verificar sirve (pantalla de advertencia al autorizar).
+  - **Pasos manuales tras el primer deploy** (mismo motivo que Document Intelligence: el RBAC genérico
+    necesita User Access Administrator, que el SP de CI/CD no tiene): dar a la Function App
+    `Key Vault Secrets User` y a quien cargue secretos `Key Vault Secrets Officer`:
+    ```bash
+    KV=$(az keyvault show -n <keyVaultName> --query id -o tsv)
+    az role assignment create --role "Key Vault Secrets User" --scope $KV \
+      --assignee $(az functionapp identity show -n <functionAppName> -g <rg> --query principalId -o tsv)
+    az role assignment create --role "Key Vault Secrets Officer" --scope $KV \
+      --assignee $(az ad signed-in-user show --query id -o tsv)
+    ```
+    Sin el primero, `google_auth` falla con "No pude leer las credenciales... ". El vault tiene purge
+    protection: un secreto borrado queda 30 días en soft delete.
+  - **El cuerpo de un correo es texto de un tercero (prompt injection).** `gmail_read` lo devuelve bajo
+    `UNTRUSTED_EMAIL_BODY` y el prompt prohíbe ejecutar instrucciones que vengan dentro de un correo.
+    Gmail es solo lectura, pero Calendar escribe, así que un correo hostil podría pedir crear
+    eventos/invitaciones: por eso las invitaciones por mail son opt-in (`send_invitations`, por defecto
+    `sendUpdates=none`) y el prompt exige confirmar antes de crear/mover/borrar.
+
+- **Reglas de negocio del owner (`tenants.businessRules[]`) = extensión del system prompt por tenant.**
+  `add/update/delete_business_rule` (`tools/business_rules.py`, **solo owner**; admin/walker las ven
+  pero no las cambian). Validación/render puros en `business_rules.py`; escritura con ETag en
+  `repositories/tenants.py::update_business_rules`. Viajan en `ctx.tenant`, así que cuestan cero lecturas
+  extra. Se agregan **al final** del prompt del tenant (y de los prompts de recordatorios/reportes), no en
+  modo platform_admin.
+  - **Límites: 20 reglas, 300 caracteres c/u, 4000 en total (~1,3K tokens).** El prompt + tools de
+    Haiku 5.5 ya pesa ~15-35K tokens y su tokenizador cuenta ~30% más que el de 4.x (~3 caracteres/token en
+    español): 4000 caracteres es <10% del prompt y ~$0,00013/turno a $0,10/MTok. El límite no es de costo
+    sino de atención — una lista larga diluye las reglas base (el fallo de "anotado" sin tool ya era de
+    instruction-following). Se puede subir con evidencia (`scripts/eval_models.py`), no a ojo.
+  - **El límite de seguridad real NO es el filtro de texto**, es que `require_role`/`require_tenant`, las
+    partition keys y el gating de tools están en código: ninguna regla puede dar permisos ni abrir otro
+    tenant. Aun así, defensa en profundidad: (1) `clean()` aplana saltos de línea (una regla no puede
+    falsificar una viñeta/sección) y borra caracteres invisibles; (2) se rechazan `<` `>` y frases que
+    intentan sobrescribir instrucciones, nombrar `platform_admin` o apuntar a otros negocios (regex
+    fácil de parafrasear — no es la barrera); (3) el bloque se rinde bajo un preámbulo que lo subordina a
+    todo lo anterior; (4) `render_block` **revalida al renderizar**, por si alguien editó el doc directo
+    en Cosmos.
+  - **Inyección persistente vía correo.** Un correo hostil podría pedirle a George "agrega la regla X", y
+    la regla quedaría en el prompt de todas las conversaciones futuras. Barrera mecánica en
+    `agent._dispatch_tool_use_blocks`: si en el turno ya corrió `gmail_search/gmail_read`, las tools de reglas
+    devuelven error (el owner repite el pedido en un mensaje aparte). Mismo criterio que `_VERIFY_NUDGE`:
+    no depender de que el modelo se acuerde de una regla de prompt. Riesgo residual: el texto OCR de una foto
+    entra como mensaje del usuario y no está cubierto por este guard.
+
 ## Decisiones que no son obvias leyendo el código
 
 - **`main.bicep` es subscription-scope y crea el resource group él mismo** (recurso

@@ -57,6 +57,7 @@ var cosmosAccountName = toLower('cosmos-${appName}-${environmentName}-${uniqueSu
 var functionAppName = toLower('func-${appName}-${environmentName}-${uniqueSuffix}')
 var appServicePlanName = toLower('plan-${appName}-${environmentName}')
 var documentIntelligenceAccountName = toLower('docint-${appName}-${environmentName}-${uniqueSuffix}')
+var keyVaultName = toLower('kv-${take(appName, 6)}-${take(uniqueSuffix, 10)}')
 var databaseName = 'george'
 
 module storage 'storage.bicep' = {
@@ -88,6 +89,15 @@ module documentIntelligence 'documentintelligence.bicep' = {
   }
 }
 
+module keyVault 'keyvault.bicep' = {
+  name: 'keyvault'
+  params: {
+    vaultName: keyVaultName
+    location: location
+    tags: tags
+  }
+}
+
 module functionApp 'functionapp.bicep' = {
   name: 'functionapp'
   params: {
@@ -104,6 +114,7 @@ module functionApp 'functionapp.bicep' = {
     anthropicApiKey: anthropicApiKey
     groqApiKey: groqApiKey
     documentIntelligenceEndpoint: documentIntelligence.outputs.endpoint
+    keyVaultUri: keyVault.outputs.vaultUri
     anthropicModel: anthropicModel
     defaultTimezone: defaultTimezone
     platformAdminChatId: platformAdminChatId
@@ -164,6 +175,11 @@ resource cosmosDataAccessDeployer 'Microsoft.DocumentDB/databaseAccounts/sqlRole
 //   az role assignment create --assignee <functionApp principalId> \
 //     --role "Cognitive Services User" --scope <documentIntelligence account id>
 
+// NOT granted here either, same reason as Document Intelligence above
+// (`Microsoft.Authorization/roleAssignments` needs User Access Administrator).
+// Grant "Key Vault Secrets User" to the Function App identity manually after
+// the first deploy — see CLAUDE.md, "Google (Gmail / Calendar)".
+
 module diagnostics 'diagnostics.bicep' = {
   name: 'diagnostics'
   params: {
@@ -178,5 +194,7 @@ output functionAppHostName string = functionApp.outputs.defaultHostName
 output cosmosEndpoint string = cosmos.outputs.endpoint
 output cosmosDatabaseName string = cosmos.outputs.databaseName
 output documentIntelligenceEndpoint string = documentIntelligence.outputs.endpoint
+output keyVaultName string = keyVault.outputs.vaultName
+output keyVaultUri string = keyVault.outputs.vaultUri
 output storageAccountName string = storage.outputs.storageAccountName
 output telegramWebhookUrl string = 'https://${functionApp.outputs.defaultHostName}/api/telegram/${telegramWebhookPath}'

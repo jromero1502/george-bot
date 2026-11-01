@@ -327,6 +327,11 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
     ```
     Sin el primero, `google_auth` falla con "No pude leer las credenciales... ". El vault tiene purge
     protection: un secreto borrado queda 30 días en soft delete.
+  - **Los recordatorios `kind='report'` también pueden leer Gmail** (`gmail_search`/`gmail_read` en
+    `agent._REPORT_TOOL_NAMES`, agregados 2026-11-01). Antes un recordatorio que pedía "revisa mis correos"
+    no podía: `kind='prompt'` no tiene tools y `kind='report'` solo tenía las de registros. Se agregaron solo las
+    de lectura; `calendar_*` queda fuera a propósito (escribe) y el reporte nunca tiene tools de escritura, así
+    que un correo hostil no tiene nada que abusar. Para correo desde un recordatorio hay que usar `kind='report'`.
   - **El cuerpo de un correo es texto de un tercero (prompt injection).** `gmail_read` lo devuelve bajo
     `UNTRUSTED_EMAIL_BODY` y el prompt prohíbe ejecutar instrucciones que vengan dentro de un correo.
     Gmail es solo lectura, pero Calendar escribe, así que un correo hostil podría pedir crear

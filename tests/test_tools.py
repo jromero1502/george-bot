@@ -615,3 +615,15 @@ def test_recall_chat_history_rejects_invalid_date_format():
     )
     assert is_error is True
     assert "invalida" in result.lower()
+
+
+def test_report_tools_allow_gmail_read_only_but_no_writes():
+    from george import agent
+
+    names = set(agent._REPORT_TOOL_NAMES)
+    assert {"gmail_search", "gmail_read"} <= names
+    assert not any(n.startswith("calendar_") for n in names)
+    for n in names:
+        assert "create" not in n and "delete" not in n and "update" not in n and "define" not in n
+    defs = registry.anthropic_tool_defs(only=agent._REPORT_TOOL_NAMES)
+    assert {d["name"] for d in defs} == names

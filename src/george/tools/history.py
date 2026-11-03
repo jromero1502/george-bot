@@ -86,7 +86,7 @@ TOOLS = [
         name="recall_chat_history",
         description=(
             "Trae los mensajes reales (de cualquier chat de ESTE negocio, no solo el tuyo) en una fecha o rango de "
-            "fechas pasado — usala cuando el usuario te pida recuperar, revisar o continuar algo de un dia "
+            "fechas pasado — úsala cuando el usuario te pida recuperar, revisar o continuar algo de un dia "
             "anterior que ya no aparece en tu historial normal de la conversacion (ej. 'recupera la lista del "
             "martes', 'que paso el lunes con...'). Si el usuario que pregunta no es quien escribio esos mensajes "
             "originalmente (ej. otro miembro del equipo), los va a encontrar igual — es historial del negocio, no "

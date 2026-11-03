@@ -11,6 +11,7 @@ from typing import Any, Optional
 import httpx
 
 from george.config import settings
+from george.telegram_format import markdown_to_telegram_html
 
 logger = logging.getLogger("george.telegram")
 
@@ -48,10 +49,24 @@ def verify_webhook_secret(header_value: Optional[str]) -> bool:
 
 
 def send_message(chat_id: str, text: str, reply_to_message_id: Optional[int] = None) -> dict[str, Any]:
+    """Envía `text` (Markdown del modelo) convertido a HTML de Telegram. Si
+    Telegram rechaza el formato (400), reintenta en texto plano para que el
+    usuario nunca se quede sin respuesta por un problema de formato."""
     payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
     if reply_to_message_id is not None:
         payload["reply_to_message_id"] = reply_to_message_id
-    return _post("sendMessage", payload)
+    try:
+        formatted = {**payload, "text": markdown_to_telegram_html(text), "parse_mode": "HTML"}
+    except Exception:  # noqa: BLE001 - el formato nunca debe impedir enviar
+        logger.exception("markdown_to_telegram_html failed; sending plain text")
+        return _post("sendMessage", payload)
+    try:
+        return _post("sendMessage", formatted)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 400:
+            raise
+        logger.warning("Telegram rejected HTML formatting (%s); resending plain", exc.response.text)
+        return _post("sendMessage", payload)
 
 
 def send_chat_action(chat_id: str, action: str = "typing") -> dict[str, Any]:

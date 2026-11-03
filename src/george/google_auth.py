@@ -6,8 +6,9 @@ Nothing here ever persists a token: the refresh token stays in Key Vault, and th
 short-lived access token only lives in this process's memory.
 
 The refresh token must have been granted (by the account owner, once) the scopes
-https://www.googleapis.com/auth/gmail.readonly and
-https://www.googleapis.com/auth/calendar.events. Keep the OAuth consent screen
+https://www.googleapis.com/auth/gmail.readonly,
+https://www.googleapis.com/auth/calendar.events and
+https://www.googleapis.com/auth/drive (Drive tools: tools/drive.py). Keep the OAuth consent screen
 in "In production" publishing status — in "Testing" Google expires refresh
 tokens after 7 days (surfaces here as `invalid_grant`).
 """

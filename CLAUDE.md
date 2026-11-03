@@ -332,6 +332,17 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
     no podía: `kind='prompt'` no tiene tools y `kind='report'` solo tenía las de registros. Se agregaron solo las
     de lectura; `calendar_*` queda fuera a propósito (escribe) y el reporte nunca tiene tools de escritura, así
     que un correo hostil no tiene nada que abusar. Para correo desde un recordatorio hay que usar `kind='report'`.
+  - **Drive (`tools/drive.py`, owner/admin) + puente Gmail→Drive.** `gmail_attachment_to_drive` baja los
+    adjuntos de un correo y los sube a Drive **dentro del handler** (subida resumable, tope 25 MB y 10 adjuntos por
+    llamada): los bytes nunca pasan por el modelo, que solo recibe nombres y links. También `drive_search`,
+    `drive_read` (texto, CSV, Docs/Sheets/Slides exportados; PDF/imagen/Office solo devuelven metadata) y
+    `drive_create_folder`. Deliberadamente **no hay tool para compartir ni cambiar permisos**. `drive_read` está en
+    `agent._UNTRUSTED_CONTENT_TOOLS` (mismo bloqueo de reglas de negocio que el correo) y devuelve el texto bajo
+    `UNTRUSTED_FILE_CONTENT`; los reportes programados NO tienen tools de Drive (`gmail_attachment_to_drive` escribe).
+    **Requiere el scope `https://www.googleapis.com/auth/drive`** además de gmail.readonly y calendar.events (con
+    `drive.file` no se podría subir a carpetas ya existentes): hay que habilitar la Drive API en el proyecto de Google
+    Cloud y **regenerar el refresh token** con los tres scopes y actualizar el secreto `google-<tenantId>`
+    (`scripts/set_google_credentials.ps1`). Sin el scope, las tools fallan con el 403 "Google denegó el acceso".
   - **El cuerpo de un correo es texto de un tercero (prompt injection).** `gmail_read` lo devuelve bajo
     `UNTRUSTED_EMAIL_BODY` y el prompt prohíbe ejecutar instrucciones que vengan dentro de un correo.
     Gmail es solo lectura, pero Calendar escribe, así que un correo hostil podría pedir crear

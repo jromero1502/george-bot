@@ -42,7 +42,7 @@ def _create_tenant(input_: dict[str, Any], ctx: ToolContext) -> str:
                 f"El chat {owner_chat_id} ya es {membership['role']!r} de un negocio llamado "
                 f"{existing_tenant['name']!r} (tenant_id={membership['tenantId']!r}). Si es el mismo negocio, "
                 "no crees uno nuevo — usa add_chat_to_tenant si falta asociar otro chat a ese mismo tenant, o "
-                "decile al usuario que pida switch_business desde su propio chat para operarlo."
+                "dile al usuario que pida switch_business desde su propio chat para operarlo."
             )
 
     timezone = input_.get("timezone") or "America/Bogota"
@@ -262,7 +262,7 @@ TOOLS = [
         name="get_chat_memberships",
         description=(
             "Dado un chatId, devuelve a qué negocios pertenece (tenantId, nombre, rol en cada uno, y cuál está "
-            "activo). Usala para responder 'a cuántos/cuáles negocios pertenece el chat X' — list_tenants no "
+            "activo). Úsala para responder 'a cuántos/cuáles negocios pertenece el chat X' — list_tenants no "
             "tiene esa información."
         ),
         input_schema={

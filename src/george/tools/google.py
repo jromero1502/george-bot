@@ -320,7 +320,7 @@ _DATETIME_HINT = (
 )
 _INVITE_HINT = (
     "true para que Google envíe correos de invitación/aviso a los invitados; por defecto no se envía nada. "
-    "Confirmá con el usuario antes de poner true."
+    "Confirma con el usuario antes de poner true."
 )
 
 _EVENT_FIELDS: dict[str, Any] = {
@@ -386,7 +386,7 @@ TOOLS = [
         name="calendar_create_event",
         description=(
             "Crea un evento en el Google Calendar del negocio. Con add_meet=true le agrega una videollamada de "
-            "Google Meet y devuelve el meet_link. Confirmá fecha, hora e invitados con el usuario antes de crear."
+            "Google Meet y devuelve el meet_link. Confirma fecha, hora e invitados con el usuario antes de crear."
         ),
         input_schema={
             "type": "object",
@@ -427,7 +427,7 @@ TOOLS = [
     ),
     ToolSpec(
         name="calendar_delete_event",
-        description="Elimina un evento del calendario (irreversible). Confirmá con el usuario antes.",
+        description="Elimina un evento del calendario (irreversible). Confirma con el usuario antes.",
         input_schema={
             "type": "object",
             "properties": {

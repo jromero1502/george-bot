@@ -72,7 +72,7 @@ def require_tenant(ctx: ToolContext) -> str:
     that silently scans nothing or, worse, everything."""
     if ctx.tenant_id is None:
         raise ToolError(
-            "Tu chat no está asociado a ningún negocio todavía — pedile al administrador "
+            "Tu chat no está asociado a ningún negocio todavía — pídele al administrador "
             "de la plataforma que te registre en un tenant."
         )
     return ctx.tenant_id

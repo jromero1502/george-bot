@@ -69,6 +69,32 @@ def send_message(chat_id: str, text: str, reply_to_message_id: Optional[int] = N
         return _post("sendMessage", payload)
 
 
+def send_document(
+    chat_id: str,
+    filename: str,
+    content: bytes,
+    mime_type: str = "application/octet-stream",
+    caption: Optional[str] = None,
+    reply_to_message_id: Optional[int] = None,
+) -> dict[str, Any]:
+    """Uploads a file to the chat (multipart; Telegram bots accept up to 50 MB).
+    The caption is sent as plain text — no parse_mode, so it can't be rejected."""
+    data: dict[str, Any] = {"chat_id": chat_id}
+    if caption:
+        data["caption"] = caption[:1024]
+    if reply_to_message_id is not None:
+        data["reply_to_message_id"] = reply_to_message_id
+    if settings.dry_run:
+        logger.info("[DRY_RUN] telegram.sendDocument %s (%d bytes) data=%s", filename, len(content), data)
+        return {"ok": True, "result": {}}
+    with httpx.Client(timeout=120.0) as client:
+        response = client.post(
+            _method_url("sendDocument"), data=data, files={"document": (filename, content, mime_type)}
+        )
+        response.raise_for_status()
+        return response.json()
+
+
 def send_chat_action(chat_id: str, action: str = "typing") -> dict[str, Any]:
     return _post("sendChatAction", {"chat_id": chat_id, "action": action})
 

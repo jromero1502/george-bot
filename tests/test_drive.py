@@ -146,3 +146,33 @@ def test_send_file_rejects_folder_and_huge(monkeypatch):
     monkeypatch.setattr(google, "_request", lambda *a, **k: {"id": "d", "name": "x", "mimeType": "video/mp4", "size": str(30 * 1024 * 1024)})
     with pytest.raises(ToolError, match="20 MB"):
         drive._drive_send_file({"file_id": "d"}, ctx())
+
+
+def test_save_email_uploads_eml_with_dated_name(monkeypatch):
+    sends = []
+
+    def req(t, m, u, **kw):
+        if kw.get("params", {}).get("format") == "raw":
+            return {"raw": b64(b"From: a@b.com\r\nSubject: Recibo\r\n\r\ncuerpo")}
+        return {"internalDate": "1793664000000", "payload": {"headers": [{"name": "Subject", "value": "Recibo / pago"}]}}
+
+    def send(t, m, u, **kw):
+        sends.append((m, kw))
+        if m == "POST":
+            return httpx.Response(200, headers={"Location": "https://u/x"}, json={})
+        return httpx.Response(200, json={"id": "D1", "webViewLink": "L"})
+
+    monkeypatch.setattr(google, "_request", req)
+    monkeypatch.setattr(google, "_send", send)
+    out = json.loads(drive._gmail_save_email_to_drive({"message_id": "m1"}, ctx()))
+    assert out["saved"] and out["link"] == "L"
+    post = sends[0][1]
+    assert post["json"]["name"].endswith("Recibo _ pago.eml") and post["headers"]["X-Upload-Content-Type"] == "message/rfc822"
+    assert sends[1][1]["content"].startswith(b"From: a@b.com")
+
+
+def test_save_email_requires_role_and_id():
+    with pytest.raises(ToolError):
+        drive._gmail_save_email_to_drive({"message_id": "m"}, ctx("walker"))
+    with pytest.raises(ToolError, match="message_id"):
+        drive._gmail_save_email_to_drive({}, ctx())

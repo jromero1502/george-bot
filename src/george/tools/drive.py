@@ -178,6 +178,50 @@ def _gmail_attachment_to_drive(input_: dict[str, Any], ctx: ToolContext) -> str:
     )
 
 
+def _gmail_save_email_to_drive(input_: dict[str, Any], ctx: ToolContext) -> str:
+    """Saves a whole email as .eml (RFC 822: original headers, body, inline images) —
+    the evidence for receipts/confirmations that arrive with no attachment."""
+    require_role(ctx, _ROLES, "gmail_save_email_to_drive")
+    tenant_id = require_tenant(ctx)
+    message_id = (input_.get("message_id") or "").strip()
+    if not message_id:
+        raise ToolError("Falta message_id (sale de gmail_search).")
+    folder_id = (input_.get("folder_id") or "").strip()
+    if folder_id:
+        _check_folder(tenant_id, folder_id)
+
+    meta = google._request(
+        tenant_id, "GET", f"{_GMAIL}/messages/{message_id}",
+        params={"format": "metadata", "metadataHeaders": ["Subject", "Date", "From"]},
+    )
+    raw = google._request(tenant_id, "GET", f"{_GMAIL}/messages/{message_id}", params={"format": "raw"}).get("raw", "")
+    content = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
+    if not content:
+        raise ToolError("Gmail devolvió el correo vacío.")
+    if len(content) > _MAX_ATTACHMENT_BYTES:
+        raise ToolError("El correo pesa más de 25 MB; no lo puedo guardar.")
+
+    internal = meta.get("internalDate")
+    day = ""
+    if internal:
+        from datetime import datetime, timezone
+
+        day = datetime.fromtimestamp(int(internal) / 1000, tz=timezone.utc).strftime("%Y-%m-%d") + " - "
+    name = input_.get("new_name") or f"{day}{google._header(meta, 'Subject') or 'correo'}"
+    name = _safe_filename(name)
+    if not name.lower().endswith(".eml"):
+        name += ".eml"
+    created = _upload(tenant_id, name, "message/rfc822", content, folder_id)
+    return json.dumps(
+        {
+            "saved": True,
+            **_file_view(created),
+            "email": {"from": google._header(meta, "From"), "subject": google._header(meta, "Subject")},
+        },
+        ensure_ascii=False,
+    )
+
+
 # ---------------------------------------------------------------- Drive
 
 
@@ -338,6 +382,27 @@ TOOLS = [
         },
         allowed_roles=_ROLES,
         handler=_gmail_attachment_to_drive,
+    ),
+    ToolSpec(
+        name="gmail_save_email_to_drive",
+        description=(
+            "Guarda un correo COMPLETO de Gmail (message_id de gmail_search) en Drive como archivo .eml, con sus "
+            "encabezados originales y cuerpo. Es la evidencia para recibos o confirmaciones que llegan SIN adjuntos; "
+            "si el correo sí trae adjuntos, usa gmail_attachment_to_drive. Devuelve el link para referenciarlo "
+            "(ej. en la description de un gasto). `folder_id` elige la carpeta; sin él cae en la raíz de Mi unidad."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "message_id": {"type": "string"},
+                "folder_id": {"type": "string", "description": "Carpeta de destino en Drive"},
+                "new_name": {"type": "string", "description": "Nombre del archivo; por defecto 'AAAA-MM-DD - Asunto.eml'"},
+            },
+            "required": ["message_id"],
+            "additionalProperties": False,
+        },
+        allowed_roles=_ROLES,
+        handler=_gmail_save_email_to_drive,
     ),
     ToolSpec(
         name="drive_search",

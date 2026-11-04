@@ -336,7 +336,8 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
     adjuntos de un correo y los sube a Drive **dentro del handler** (subida resumable, tope 25 MB y 10 adjuntos por
     llamada): los bytes nunca pasan por el modelo, que solo recibe nombres y links. También `drive_search`,
     `drive_read` (texto, CSV, Docs/Sheets/Slides exportados; PDF/imagen/Office solo devuelven metadata) y
-    `drive_create_folder`. Deliberadamente **no hay tool para compartir ni cambiar permisos**. `drive_read` está en
+    `drive_create_folder`. `gmail_save_email_to_drive` guarda un correo completo como `.eml` (evidencia de recibos que llegan sin
+    adjuntos; el link va en la `description` del gasto). Deliberadamente **no hay tool para compartir ni cambiar permisos**. `drive_read` está en
     `agent._UNTRUSTED_CONTENT_TOOLS` (mismo bloqueo de reglas de negocio que el correo) y devuelve el texto bajo
     `UNTRUSTED_FILE_CONTENT`; los reportes programados NO tienen tools de Drive (`gmail_attachment_to_drive` escribe).
     **Requiere el scope `https://www.googleapis.com/auth/drive`** además de gmail.readonly y calendar.events (con

@@ -267,3 +267,60 @@ def test_max_tokens_reply_is_honest(monkeypatch):
     monkeypatch.setattr(agent, "_chat_system_prompt", lambda c: "p")
     out = agent.run_agent(ctx(), [], "hola")
     assert "cortó" in out.reply_text and "hice los cambios" not in out.reply_text
+
+
+# ------------------------------------------------------------ feedback de progreso
+def test_status_phrases_cover_only_real_tools_and_dedupe():
+    from george import progress
+
+    assert set(progress.TOOL_STATUS) <= set(registry._BY_NAME)
+    # las de escritura directa no aplican: el plan las cubre con propose_actions
+    assert progress.describe(["get_current_datetime", "confirm_pending"]) is None
+    assert progress.describe(["gmail_search", "gmail_read", "search_finance"]) == (
+        "📧 Revisando tu correo… 💰 Consultando los movimientos…"
+    )
+
+
+def test_status_message_creates_edits_and_clears(monkeypatch):
+    from george import progress, telegram
+
+    calls = []
+    monkeypatch.setattr(telegram, "send_message", lambda c, t, reply_to_message_id=None: calls.append(("send", t, reply_to_message_id)) or {"result": {"message_id": 7}})
+    monkeypatch.setattr(telegram, "edit_message_text", lambda c, m, t: calls.append(("edit", m, t)))
+    monkeypatch.setattr(telegram, "delete_message", lambda c, m: calls.append(("del", m)))
+    st = progress.StatusMessage("1", reply_to=5)
+    st.on_tools(["get_current_datetime"])  # sin frase: no manda nada
+    st.on_tools(["gmail_search"])
+    st.on_tools(["gmail_read"])  # mismo texto: no edita
+    st.on_tools(["search_finance"])
+    st.clear()
+    assert calls == [
+        ("send", "📧 Revisando tu correo…", 5),
+        ("edit", 7, "💰 Consultando los movimientos…"),
+        ("del", 7),
+    ]
+
+
+def test_status_message_reuses_webhook_ack_and_never_raises(monkeypatch):
+    from george import progress, telegram
+
+    def boom(*a, **k):
+        raise RuntimeError("telegram caído")
+
+    monkeypatch.setattr(telegram, "edit_message_text", boom)
+    monkeypatch.setattr(telegram, "delete_message", boom)
+    st = progress.StatusMessage("1", message_id=9)
+    st.show("x")
+    st.clear()  # no lanza
+
+
+def test_on_tools_called_before_dispatch(monkeypatch):
+    from types import SimpleNamespace
+
+    order = []
+    monkeypatch.setattr(registry, "dispatch", lambda n, i, c, only=None: (order.append("dispatch") or "ok", False))
+    blocks = [SimpleNamespace(type="tool_use", name="search_clients", input={}, id="1")]
+    agent._dispatch_tool_use_blocks(SimpleNamespace(content=blocks), ctx(), None, [], lambda names: order.append(("status", names)))
+    assert order == [("status", ["search_clients"]), "dispatch"]
+    # un callback que falla no rompe el turno
+    agent._dispatch_tool_use_blocks(SimpleNamespace(content=blocks), ctx(), None, [], lambda names: 1 / 0)

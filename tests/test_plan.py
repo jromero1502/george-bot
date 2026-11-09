@@ -222,3 +222,105 @@ def test_lock_released_when_body_raises(store):
         with plans.tenant_lock("t-1"):
             raise RuntimeError("x")
     assert "lock::t-1" not in store.docs
+
+
+# ------------------------------------------------------------ pre-validación al proponer
+_TYPE = {
+    "typeKey": "tareas", "name": "Tareas", "status": "active", "mode": "event", "measureField": "cantidad",
+    "groupField": None, "clientLink": "none",
+    "fields": [
+        {"key": "estado", "label": "Estado", "type": "choice", "choices": ["pendiente", "hecho"], "required": True},
+        {"key": "cantidad", "label": "Cantidad", "type": "number", "required": True},
+    ],
+}
+
+
+def _log(values):
+    return [{"tool": "log_record", "input": {"type_key": "tareas", "values": values}, "label": "Tarea"}]
+
+
+def test_log_record_validated_when_proposed():
+    c = ToolContext(chat_id="c", role="owner", user_name="A", correlation_id="x", tenant_id="t-1", tenant={}, record_types=(_TYPE,))
+    assert plan.validate_actions(_log({"estado": "hecho", "cantidad": 1}), c)
+    with pytest.raises(ValueError, match="estado"):
+        plan.validate_actions(_log({"estado": "terminado", "cantidad": 1}), c)
+    # el mismo plan define el tipo: no se pre-valida contra uno que aún no existe
+    both = [{"tool": "define_record_type", "input": {"name": "Tareas", "fields": [], "mode": "event", "measure_field": "cantidad"}, "label": "Tipo"}] + _log({"estado": "x"})
+    both[0]["input"].update({"fields": []})
+    assert plan.validate_actions(both, c)
+
+
+def test_log_record_unknown_type_rejected(monkeypatch):
+    monkeypatch.setattr(plan.records_repo, "get_record_type", lambda t, k: None)
+    with pytest.raises(ValueError, match="no existe"):
+        plan.validate_actions(_log({"estado": "hecho"}), ctx())
+
+
+# ------------------------------------------------------------ respuesta cuando se corta
+def test_max_tokens_reply_is_honest(monkeypatch):
+    from types import SimpleNamespace
+
+    resp = SimpleNamespace(
+        stop_reason="max_tokens", content=[], usage=SimpleNamespace(input_tokens=1, output_tokens=1)
+    )
+    monkeypatch.setattr(agent, "_get_client", lambda: SimpleNamespace(messages=SimpleNamespace(create=lambda **k: resp)))
+    monkeypatch.setattr(agent, "_chat_system_prompt", lambda c: "p")
+    out = agent.run_agent(ctx(), [], "hola")
+    assert "cortó" in out.reply_text and "hice los cambios" not in out.reply_text
+
+
+# ------------------------------------------------------------ feedback de progreso
+def test_status_phrases_cover_only_real_tools_and_dedupe():
+    from george import progress
+
+    assert set(progress.TOOL_STATUS) <= set(registry._BY_NAME)
+    # las de escritura directa no aplican: el plan las cubre con propose_actions
+    assert progress.describe(["get_current_datetime", "confirm_pending"]) is None
+    assert progress.describe(["gmail_search", "gmail_read", "search_finance"]) == (
+        "📧 Revisando tu correo… 💰 Consultando los movimientos…"
+    )
+
+
+def test_status_message_creates_edits_and_clears(monkeypatch):
+    from george import progress, telegram
+
+    calls = []
+    monkeypatch.setattr(telegram, "send_message", lambda c, t, reply_to_message_id=None: calls.append(("send", t, reply_to_message_id)) or {"result": {"message_id": 7}})
+    monkeypatch.setattr(telegram, "edit_message_text", lambda c, m, t: calls.append(("edit", m, t)))
+    monkeypatch.setattr(telegram, "delete_message", lambda c, m: calls.append(("del", m)))
+    st = progress.StatusMessage("1", reply_to=5)
+    st.on_tools(["get_current_datetime"])  # sin frase: no manda nada
+    st.on_tools(["gmail_search"])
+    st.on_tools(["gmail_read"])  # mismo texto: no edita
+    st.on_tools(["search_finance"])
+    st.clear()
+    assert calls == [
+        ("send", "📧 Revisando tu correo…", 5),
+        ("edit", 7, "💰 Consultando los movimientos…"),
+        ("del", 7),
+    ]
+
+
+def test_status_message_reuses_webhook_ack_and_never_raises(monkeypatch):
+    from george import progress, telegram
+
+    def boom(*a, **k):
+        raise RuntimeError("telegram caído")
+
+    monkeypatch.setattr(telegram, "edit_message_text", boom)
+    monkeypatch.setattr(telegram, "delete_message", boom)
+    st = progress.StatusMessage("1", message_id=9)
+    st.show("x")
+    st.clear()  # no lanza
+
+
+def test_on_tools_called_before_dispatch(monkeypatch):
+    from types import SimpleNamespace
+
+    order = []
+    monkeypatch.setattr(registry, "dispatch", lambda n, i, c, only=None: (order.append("dispatch") or "ok", False))
+    blocks = [SimpleNamespace(type="tool_use", name="search_clients", input={}, id="1")]
+    agent._dispatch_tool_use_blocks(SimpleNamespace(content=blocks), ctx(), None, [], lambda names: order.append(("status", names)))
+    assert order == [("status", ["search_clients"]), "dispatch"]
+    # un callback que falla no rompe el turno
+    agent._dispatch_tool_use_blocks(SimpleNamespace(content=blocks), ctx(), None, [], lambda names: 1 / 0)

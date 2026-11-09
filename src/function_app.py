@@ -13,7 +13,7 @@ from typing import Any, List, Optional
 
 import azure.functions as func
 
-from george import context, plan, telegram
+from george import context, plan, progress, telegram
 from george.agent import AgentResult, generate_reminder_message, generate_report_message, run_agent
 from george.config import estimate_cost_usd, settings
 from george.document_intelligence import extract_text as extract_image_text
@@ -100,6 +100,21 @@ def telegram_webhook(req: func.HttpRequest, outMsg: func.Out[str]) -> func.HttpR
         "chatId": chat_id,
         "message": message,
     }
+    # Audio y foto tardan (transcripción/OCR + el turno): acuse inmediato, fijo y
+    # sin modelo. process_update lo reutiliza como mensaje de estado y lo borra
+    # al responder.
+    if "voice" in message or "photo" in message:
+        try:
+            ack = telegram.send_message(
+                chat_id,
+                progress.ACK_VOICE if "voice" in message else progress.ACK_PHOTO,
+                reply_to_message_id=message.get("message_id"),
+            )
+            ack_id = telegram.message_id_of(ack)
+            if ack_id is not None:
+                queue_payload["ackMessageId"] = ack_id
+        except Exception:
+            logger.exception("telegram_webhook: failed to send ack to chat %s", chat_id)
     # Test hook (scripts/simulate_update.py --voice): a synthetic update can
     # carry a local file path for the voice note, bypassing Telegram's
     # getFile/download entirely — see process_update below.
@@ -176,6 +191,25 @@ def _process_update_locked(
     message: dict[str, Any],
     user_name: str,
     ctx: ToolContext,
+) -> None:
+    # Mensaje de estado (progress.py): reutiliza el acuse del webhook si lo hubo y
+    # se borra siempre al terminar, con respuesta final ya enviada o no.
+    status = progress.StatusMessage(chat_id, message.get("message_id"), payload.get("ackMessageId"))
+    try:
+        _process_update_body(msg, actionMsg, payload, chat_id, message, user_name, ctx, status)
+    finally:
+        status.clear()
+
+
+def _process_update_body(
+    msg: func.QueueMessage,
+    actionMsg: func.Out[str],
+    payload: dict[str, Any],
+    chat_id: str,
+    message: dict[str, Any],
+    user_name: str,
+    ctx: ToolContext,
+    status: progress.StatusMessage,
 ) -> None:
     update_id = payload.get("updateId")
     correlation_id = ctx.correlation_id
@@ -259,6 +293,9 @@ def _process_update_locked(
         telegram.send_message(chat_id, "Por ahora solo puedo procesar mensajes de texto, fotos o notas de voz.")
         return
 
+    if payload.get("ackMessageId") and user_text and user_text.strip():
+        status.show(progress.AFTER_TRANSCRIBE)
+
     if not user_text or not user_text.strip():
         telegram.send_message(chat_id, "No logré entender el mensaje, ¿puedes intentarlo de nuevo?")
         return
@@ -268,7 +305,12 @@ def _process_update_locked(
     history_messages = _history_to_messages(history_docs, group=in_group)
 
     # input_record above keeps the raw text; only what the model sees is tagged.
-    result = run_agent(ctx, history_messages, _as_speaker(user_name, user_text) if in_group else user_text)
+    result = run_agent(
+        ctx,
+        history_messages,
+        _as_speaker(user_name, user_text) if in_group else user_text,
+        on_tools=status.on_tools,
+    )
 
     telegram.send_message(chat_id, result.reply_text, reply_to_message_id=message.get("message_id"))
 

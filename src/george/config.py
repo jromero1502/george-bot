@@ -45,6 +45,8 @@ class Settings:
     # LLM providers
     anthropic_api_key: str = field(default_factory=lambda: _env("ANTHROPIC_API_KEY", required=True))
     anthropic_model: str = field(default_factory=lambda: _env("ANTHROPIC_MODEL", "claude-haiku-5-5"))
+    # Esfuerzo de razonamiento del chat (low|medium|high|...). Vacío = el default del modelo.
+    chat_effort: str = field(default_factory=lambda: _env("ANTHROPIC_CHAT_EFFORT", "low"))
     groq_api_key: str = field(default_factory=lambda: _env("GROQ_API_KEY", required=True))
     groq_stt_model: str = field(default_factory=lambda: _env("GROQ_STT_MODEL", "whisper-large-v3-turbo"))
 

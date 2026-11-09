@@ -9,7 +9,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Callable, Any, Optional
 
 import anthropic
 
@@ -36,7 +36,18 @@ MAX_TOOL_TURNS = 8
 # of retrying. Raising the budget doesn't guarantee a huge batch always
 # fits, but it covers realistic cases and removes the single biggest
 # observed trigger for that failure mode.
-_CHAT_MAX_TOKENS = 4096
+_CHAT_MAX_TOKENS = 16000
+
+# Datos del 2026-10-30..11-09 (conversations): 9 de 233 turnos terminaron en
+# max_tokens con 4096 — el razonamiento por defecto de Haiku 5.5 cuenta dentro
+# del tope y se comía la respuesta (a veces las tool calls). Dos cambios juntos:
+# más presupuesto Y menos esfuerzo de razonamiento en el chat (configurable con
+# ANTHROPIC_CHAT_EFFORT, sin tocar código). cache_control a nivel de request
+# marca el último bloque cacheable: el system prompt + tools (15-35K tokens) se
+# reusan entre las vueltas del loop en vez de reenviarse enteros cada vez.
+_CHAT_EXTRA: dict[str, Any] = {"cache_control": {"type": "ephemeral"}}
+if settings.chat_effort:
+    _CHAT_EXTRA["output_config"] = {"effort": settings.chat_effort}
 
 # Second, independent backstop for the same failure mode (George claiming a
 # write happened without calling any tool) — this one covers the cases that
@@ -172,6 +183,7 @@ def _dispatch_tool_use_blocks(
     ctx: ToolContext,
     tool_names: Optional[tuple[str, ...]],
     tool_calls_log: list[dict[str, Any]],
+    on_tools: Optional[Callable[[list[str]], None]] = None,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Dispatches every tool_use block in `response.content`, appending an
     audit entry to `tool_calls_log` for each (mutated in place — shared with
@@ -181,6 +193,12 @@ def _dispatch_tool_use_blocks(
     call succeeded (see _CONTEXT_SWITCH_TOOLS)."""
     tool_results: list[dict[str, Any]] = []
     context_switched = False
+    if on_tools is not None:
+        # Feedback al usuario ANTES de ejecutar (ver progress.py); nunca debe romper el turno.
+        try:
+            on_tools([b.name for b in response.content if b.type == "tool_use"])
+        except Exception:  # noqa: BLE001
+            logger.exception("agent: on_tools callback failed")
     for block in response.content:
         if block.type != "tool_use":
             continue
@@ -224,6 +242,7 @@ def run_agent(
     user_message: str,
     tool_names: Optional[tuple[str, ...]] = None,
     system_prompt: Optional[str] = None,
+    on_tools: Optional[Callable[[list[str]], None]] = None,
 ) -> AgentResult:
     """Runs the tool-use loop for one user turn: call Haiku, execute any
     tool_use blocks via the registry, feed the results back, and repeat
@@ -255,6 +274,7 @@ def run_agent(
         response = client.messages.create(
             model=settings.anthropic_model,
             max_tokens=_CHAT_MAX_TOKENS,
+            **_CHAT_EXTRA,
             system=system_prompt,
             tools=tools,
             messages=messages,
@@ -266,7 +286,7 @@ def run_agent(
             break
 
         messages.append({"role": "assistant", "content": response.content})
-        tool_results, context_switched = _dispatch_tool_use_blocks(response, ctx, tool_names, tool_calls)
+        tool_results, context_switched = _dispatch_tool_use_blocks(response, ctx, tool_names, tool_calls, on_tools)
         messages.append({"role": "user", "content": tool_results})
 
         if context_switched:
@@ -299,6 +319,7 @@ def run_agent(
         response = client.messages.create(
             model=settings.anthropic_model,
             max_tokens=_CHAT_MAX_TOKENS,
+            **_CHAT_EXTRA,
             system=system_prompt,
             tool_choice={"type": "none"},
             tools=tools,
@@ -324,6 +345,7 @@ def run_agent(
             response = client.messages.create(
                 model=settings.anthropic_model,
                 max_tokens=_CHAT_MAX_TOKENS,
+                **_CHAT_EXTRA,
                 system=system_prompt,
                 tools=tools,
                 messages=messages,
@@ -333,7 +355,7 @@ def run_agent(
 
             if response.stop_reason == "tool_use":
                 messages.append({"role": "assistant", "content": response.content})
-                tool_results, context_switched = _dispatch_tool_use_blocks(response, ctx, tool_names, tool_calls)
+                tool_results, context_switched = _dispatch_tool_use_blocks(response, ctx, tool_names, tool_calls, on_tools)
                 messages.append({"role": "user", "content": tool_results})
                 if context_switched:
                     refreshed_ctx, refresh_error = context.build_context(
@@ -354,6 +376,7 @@ def run_agent(
                 response = client.messages.create(
                     model=settings.anthropic_model,
                     max_tokens=_CHAT_MAX_TOKENS,
+                    **_CHAT_EXTRA,
                     system=system_prompt,
                     tool_choice={"type": "none"},
                     tools=tools,
@@ -368,11 +391,15 @@ def run_agent(
         reply_text = next((b.text for b in response.content if b.type == "text"), "")
     reply_text = strip_tool_log(reply_text)
     if not reply_text:
-        reply_text = (
-            "Listo, hice los cambios pero no tengo un resumen para darte."
-            if tool_calls
-            else "No logré generar una respuesta — intenta reformular tu mensaje."
-        )
+        if response is not None and response.stop_reason == "max_tokens":
+            reply_text = (
+                "Se me cortó la respuesta por ser demasiado larga y no alcancé a terminar. Pídemelo en partes "
+                "más pequeñas (por ejemplo, por día o por grupo de ítems)."
+            )
+        elif tool_calls:
+            reply_text = "Terminé de consultar pero no logré redactar la respuesta. Pídemela de nuevo."
+        else:
+            reply_text = "No logré generar una respuesta — intenta reformular tu mensaje."
 
     return AgentResult(
         reply_text=reply_text,

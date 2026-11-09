@@ -9,7 +9,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Callable, Any, Optional
 
 import anthropic
 
@@ -183,6 +183,7 @@ def _dispatch_tool_use_blocks(
     ctx: ToolContext,
     tool_names: Optional[tuple[str, ...]],
     tool_calls_log: list[dict[str, Any]],
+    on_tools: Optional[Callable[[list[str]], None]] = None,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Dispatches every tool_use block in `response.content`, appending an
     audit entry to `tool_calls_log` for each (mutated in place — shared with
@@ -192,6 +193,12 @@ def _dispatch_tool_use_blocks(
     call succeeded (see _CONTEXT_SWITCH_TOOLS)."""
     tool_results: list[dict[str, Any]] = []
     context_switched = False
+    if on_tools is not None:
+        # Feedback al usuario ANTES de ejecutar (ver progress.py); nunca debe romper el turno.
+        try:
+            on_tools([b.name for b in response.content if b.type == "tool_use"])
+        except Exception:  # noqa: BLE001
+            logger.exception("agent: on_tools callback failed")
     for block in response.content:
         if block.type != "tool_use":
             continue
@@ -235,6 +242,7 @@ def run_agent(
     user_message: str,
     tool_names: Optional[tuple[str, ...]] = None,
     system_prompt: Optional[str] = None,
+    on_tools: Optional[Callable[[list[str]], None]] = None,
 ) -> AgentResult:
     """Runs the tool-use loop for one user turn: call Haiku, execute any
     tool_use blocks via the registry, feed the results back, and repeat
@@ -278,7 +286,7 @@ def run_agent(
             break
 
         messages.append({"role": "assistant", "content": response.content})
-        tool_results, context_switched = _dispatch_tool_use_blocks(response, ctx, tool_names, tool_calls)
+        tool_results, context_switched = _dispatch_tool_use_blocks(response, ctx, tool_names, tool_calls, on_tools)
         messages.append({"role": "user", "content": tool_results})
 
         if context_switched:
@@ -347,7 +355,7 @@ def run_agent(
 
             if response.stop_reason == "tool_use":
                 messages.append({"role": "assistant", "content": response.content})
-                tool_results, context_switched = _dispatch_tool_use_blocks(response, ctx, tool_names, tool_calls)
+                tool_results, context_switched = _dispatch_tool_use_blocks(response, ctx, tool_names, tool_calls, on_tools)
                 messages.append({"role": "user", "content": tool_results})
                 if context_switched:
                     refreshed_ctx, refresh_error = context.build_context(

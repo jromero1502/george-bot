@@ -119,3 +119,23 @@ def download_file(file_path: str) -> bytes:
         response = client.get(url)
         response.raise_for_status()
         return response.content
+
+
+def message_id_of(response: dict[str, Any]) -> Optional[int]:
+    """message_id del mensaje que devolvió sendMessage (None bajo DRY_RUN)."""
+    return (response.get("result") or {}).get("message_id")
+
+
+def edit_message_text(chat_id: str, message_id: int, text: str) -> dict[str, Any]:
+    """Edita un mensaje del bot en texto plano. 'message is not modified' (400)
+    no es un error real: el texto ya era ese."""
+    try:
+        return _post("editMessageText", {"chat_id": chat_id, "message_id": message_id, "text": text})
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 400 and "not modified" in exc.response.text:
+            return {"ok": True, "result": {}}
+        raise
+
+
+def delete_message(chat_id: str, message_id: int) -> dict[str, Any]:
+    return _post("deleteMessage", {"chat_id": chat_id, "message_id": message_id})

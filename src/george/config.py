@@ -76,6 +76,7 @@ class Settings:
     # Queue names (kept in sync with infra/modules/storage.bicep)
     queue_incoming: str = "george-incoming"
     queue_reminders: str = "george-reminders"
+    queue_actions: str = "george-actions"
 
 
 settings = Settings()

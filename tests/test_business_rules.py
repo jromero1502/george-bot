@@ -107,7 +107,7 @@ def test_tenant_prompt_includes_rules_after_core_prompt():
     ctx = make_ctx(tenant={"name": "N", "businessRules": [{"id": "a1", "text": "No fiamos."}]})
     prompt = build_system_prompt(ctx)
     assert prompt.rstrip().endswith("- [a1] No fiamos.")
-    assert prompt.index("SUBORDINADAS") > prompt.index("Nunca digas que ya registraste")
+    assert prompt.index("SUBORDINADAS") > prompt.index("FLUJO DE ESCRITURAS")
 
 
 def test_prompt_without_rules_has_no_block():
@@ -120,7 +120,7 @@ def test_rules_blocked_after_reading_mail_in_same_turn(monkeypatch, store):
     monkeypatch.setattr(registry, "dispatch", lambda name, inp, ctx, only=None: (calls.append(name) or "ok", False))
     blocks = [SimpleNamespace(type="tool_use", name=n, input={}, id=n) for n in ("gmail_read", "add_business_rule")]
     log = []
-    results, _ = agent._dispatch_tool_use_blocks(SimpleNamespace(content=blocks), make_ctx(), None, log)
+    results, _ = agent._dispatch_tool_use_blocks(SimpleNamespace(content=blocks), make_ctx(), ("gmail_read", "add_business_rule"), log)
     assert calls == ["gmail_read"]
     assert results[1]["is_error"] and "Bloqueado" in results[1]["content"]
 
@@ -128,7 +128,7 @@ def test_rules_blocked_after_reading_mail_in_same_turn(monkeypatch, store):
 def test_rules_allowed_when_no_mail_read(monkeypatch):
     monkeypatch.setattr(registry, "dispatch", lambda name, inp, ctx, only=None: ("ok", False))
     blocks = [SimpleNamespace(type="tool_use", name="add_business_rule", input={}, id="x")]
-    results, _ = agent._dispatch_tool_use_blocks(SimpleNamespace(content=blocks), make_ctx(), None, [])
+    results, _ = agent._dispatch_tool_use_blocks(SimpleNamespace(content=blocks), make_ctx(), ("add_business_rule",), [])
     assert not results[0]["is_error"]
 
 

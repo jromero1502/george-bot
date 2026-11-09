@@ -17,6 +17,8 @@ from george import business_rules, context
 from george.config import settings
 from george.prompts import TONE_RULE, build_system_prompt
 from george.tool_log import CONFIRMATION_RE, strip_tool_log
+from george import plan
+from george.repositories import plans as plans_repo
 from george.tools import registry
 from george.tools.common import ToolContext
 
@@ -46,9 +48,10 @@ _CHAT_MAX_TOKENS = 4096
 _CONFIRMATION_RE = CONFIRMATION_RE  # defined in tool_log.py, shared with the history builder
 _VERIFY_NUDGE = (
     "[Verificación automática] Tu respuesta anterior suena a que ya guardaste, registraste o cargaste algo, pero "
-    "no llamaste ninguna herramienta en este turno. Si corresponde guardar algo, haz la llamada a la herramienta "
-    "correspondiente AHORA MISMO. Si no hay nada que guardar (fue solo una aclaración, una respuesta a una "
-    "pregunta, etc.), reescribí tu respuesta anterior sin dar a entender que algo quedó guardado."
+    "no ejecutaste nada: en el chat solo puedes consultar y proponer. Si corresponde guardar algo, llama "
+    "propose_actions AHORA con las acciones y pregunta al usuario si las ejecutas. Si no hay nada que guardar "
+    "(fue solo una aclaración, una respuesta a una pregunta, etc.), reescribe tu respuesta anterior sin dar a "
+    "entender que algo quedó guardado."
 )
 
 # `ToolContext` is frozen and resolved once per inbound message (see
@@ -132,6 +135,38 @@ def _get_client() -> anthropic.Anthropic:
     return _client
 
 
+def _plan_flow_block(block: Any, tool_names: Optional[tuple[str, ...]], tool_calls_log: list[dict[str, Any]]) -> Optional[str]:
+    """Reglas mecánicas del flujo propón -> confirma -> ejecuta (george/plan.py).
+    Devuelve el mensaje de error si el tool call no puede correr, o None."""
+    if tool_names is not None:  # recordatorios/reportes: ya tienen su propia lista cerrada
+        return None
+    if block.name in plan.WRITE_TOOLS:
+        return (
+            f"'{block.name}' no se ejecuta directamente en el chat. Inclúyela en propose_actions (junto con las "
+            "demás acciones del pedido) y el usuario la confirma; se ejecuta después de su confirmación."
+        )
+    if block.name == "confirm_pending" and any(c["name"] == "propose_actions" for c in tool_calls_log):
+        return (
+            "Bloqueado: el plan que acabas de proponer debe confirmarlo el usuario en su siguiente mensaje. "
+            "Pregúntale si lo ejecutas y termina tu respuesta."
+        )
+    if block.name == "propose_actions" and any(c["name"] in _UNTRUSTED_CONTENT_TOOLS for c in tool_calls_log):
+        proposed = [a.get("tool") for a in (block.input or {}).get("actions", []) if isinstance(a, dict)]
+        if any(t in _PERSISTENT_INSTRUCTION_TOOLS for t in proposed):
+            return _TAINTED_TURN_MESSAGE
+    return None
+
+
+def _chat_system_prompt(ctx: ToolContext) -> str:
+    """Prompt normal del chat + el plan pendiente de este chat (si hay), para que
+    el modelo sepa a qué se refiere el 'sí' del usuario."""
+    prompt = build_system_prompt(ctx)
+    pending = plans_repo.get_pending_plan(ctx.chat_id)
+    if pending is not None and pending.get("tenantId") == ctx.tenant_id:
+        prompt += plan.format_plan_for_prompt(pending)
+    return prompt
+
+
 def _dispatch_tool_use_blocks(
     response: Any,
     ctx: ToolContext,
@@ -150,7 +185,10 @@ def _dispatch_tool_use_blocks(
         if block.type != "tool_use":
             continue
         call_start = time.monotonic()
-        if block.name in _PERSISTENT_INSTRUCTION_TOOLS and any(
+        blocked = _plan_flow_block(block, tool_names, tool_calls_log)
+        if blocked is not None:
+            result_text, is_error = blocked, True
+        elif block.name in _PERSISTENT_INSTRUCTION_TOOLS and any(
             c["name"] in _UNTRUSTED_CONTENT_TOOLS for c in tool_calls_log
         ):
             result_text, is_error = _TAINTED_TURN_MESSAGE, True
@@ -200,7 +238,7 @@ def run_agent(
     """
     client = _get_client()
     owns_system_prompt = system_prompt is None
-    system_prompt = system_prompt or build_system_prompt(ctx)
+    system_prompt = system_prompt or _chat_system_prompt(ctx)
     tools = registry.anthropic_tool_defs(only=tool_names)
 
     messages: list[dict[str, Any]] = [*history, {"role": "user", "content": user_message}]
@@ -241,7 +279,7 @@ def run_agent(
             if refreshed_ctx is not None:
                 ctx = refreshed_ctx
                 if owns_system_prompt:
-                    system_prompt = build_system_prompt(ctx)
+                    system_prompt = _chat_system_prompt(ctx)
             else:
                 logger.warning(
                     "agent: failed to refresh context after a business switch for chat %s: %s",
@@ -304,7 +342,7 @@ def run_agent(
                     if refreshed_ctx is not None:
                         ctx = refreshed_ctx
                         if owns_system_prompt:
-                            system_prompt = build_system_prompt(ctx)
+                            system_prompt = _chat_system_prompt(ctx)
                     else:
                         logger.warning(
                             "agent: failed to refresh context after a business switch for chat %s: %s",

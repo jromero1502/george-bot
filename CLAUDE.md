@@ -182,11 +182,22 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
   una ruta de propiedad parametrizada (`c.values[@campo]` no existe), así que agregar por un
   campo elegido en runtime forzaría a interpolar su nombre en el WHERE/GROUP BY; con `amount`/
   `groupKey` en rutas fijas, `repositories/records.py::search_records`/`summarize_records`
-  quedan parametrizadas como cualquier otra query del repo. `summarize_records` reduce en
-  Python en vez de con un `GROUP BY` de Cosmos: el modo `snapshot` necesita "el registro más
-  reciente por grupo", que es un self-join que Cosmos SQL no expresa directamente, y a la escala
-  de este bot (small businesses, un query por reporte) traer hasta 500 registros y reducirlos en
-  memoria es más simple que dos rutas de agregación distintas. El prompt (`prompts.py`) inyecta
+  quedan parametrizadas como cualquier otra query del repo. **Actualización 2026-11-09:
+  `group_by` y `filters` dinámicos.** `summarize_records` acepta `group_by` (key de un campo del
+  tipo, o `period`), `filters` ({key: valor}, igualdad), `client_id` y `period`; `search_records`
+  acepta `filters` y devuelve `total_matching` (conteo real, vía `COUNT`). Esto SÍ interpola el
+  nombre del campo en el texto de la query (`c.values["campo"]`, Cosmos no parametriza rutas),
+  así que la frontera de seguridad es `record_schema.validate_query` (solo keys declaradas en
+  `fields[]`, que ya cumplen `^[a-z][a-z0-9_]{0,39}$`; los valores van siempre como parámetros)
+  más un re-chequeo de regex en `repositories/records.py::_value_path`. El modo `event` ahora
+  agrega en Cosmos (`COUNT/SUM ... GROUP BY`, sin tope de 500); como el `GROUP BY` descarta los
+  docs que no tienen el campo (opcional y vacío), se hace un segundo total y la diferencia sale
+  como `ungrouped`. El modo `snapshot` sigue reduciendo en Python (necesita "el más reciente por
+  grupo", un self-join que Cosmos SQL no expresa) con tope de 500, pero ahora avisa con
+  `warning`/`truncated` en vez de truncar en silencio. Motivo: un owner quería llevar un conteo
+  con un registro contador +1/-1, que se desincroniza; el patrón correcto es un tipo `event` y
+  contar con `summarize_records` (el prompt lo dice). Las queries de agregación no se pudieron
+  probar contra un emulador de Cosmos: la primera prueba real es en producción. El prompt (`prompts.py`) inyecta
   los tipos activos del tenant en `ToolContext.record_types` (cargados una vez por mensaje en
   `function_app.process_update`, igual que `ctx.tenant`) para que George sepa qué existe sin
   gastar un turno en `list_record_types`, y tiene una regla explícita de detección proactiva:

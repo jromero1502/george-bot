@@ -627,3 +627,25 @@ def test_report_tools_allow_gmail_read_only_but_no_writes():
         assert "create" not in n and "delete" not in n and "update" not in n and "define" not in n
     defs = registry.anthropic_tool_defs(only=agent._REPORT_TOOL_NAMES)
     assert {d["name"] for d in defs} == names
+
+
+# ---------------------------------------------------------------------------
+# repositories/records.py query building (dynamic filters / group_by)
+# ---------------------------------------------------------------------------
+def test_records_repo_value_filters_are_parametrized():
+    from george.repositories import records as records_repo
+
+    clauses, params = records_repo._where("ventas", None, None, "2026-11", None, None, [("vendedor", "Ana' OR 1=1")])
+    assert 'c.values["vendedor"] = @vf0' in clauses
+    assert {"name": "@vf0", "value": "Ana' OR 1=1"} in params
+    assert not any("OR 1=1" in c for c in clauses)
+
+
+def test_records_repo_rejects_unsafe_property_key():
+    from george.repositories import records as records_repo
+
+    with pytest.raises(ValueError):
+        records_repo._value_path('x"] OR true --')
+    assert records_repo._group_expr("period", "sabor") == "c.period"
+    assert records_repo._group_expr("sabor", "sabor") == "c.groupKey"
+    assert records_repo._group_expr(None, "sabor") == "c.groupKey"

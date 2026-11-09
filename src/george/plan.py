@@ -15,6 +15,8 @@ import re
 import time
 from typing import Any
 
+from george import record_schema
+from george.repositories import records as records_repo
 from george.tools import registry
 from george.tools.common import ToolContext
 
@@ -63,6 +65,24 @@ def format_plan_for_prompt(plan: dict[str, Any]) -> str:
     )
 
 
+def _dry_validate(name: str, tool_input: dict[str, Any], ctx: ToolContext) -> None:
+    """Valida ya, al proponer, lo que el handler validaría al ejecutar y falla
+    seguido (datos del 2026-11: 25% de los log_record fallaban por un valor fuera
+    de las opciones del campo). Así el error le llega al modelo antes de que el
+    usuario confirme, y puede corregirlo o preguntar. Solo log_record por ahora."""
+    if name != "log_record" or ctx.tenant_id is None:
+        return
+    type_key = tool_input.get("type_key")
+    type_def = next((t for t in ctx.record_types if t.get("typeKey") == type_key), None)
+    if type_def is None:
+        type_def = records_repo.get_record_type(ctx.tenant_id, type_key)
+    if type_def is None:
+        raise ValueError(f"no existe el tipo de registro {type_key!r} en este negocio (usa list_record_types).")
+    if type_def.get("status") != "active":
+        raise ValueError(f"el tipo de registro {type_def.get('name', type_key)!r} está archivado.")
+    record_schema.coerce_values(type_def, tool_input.get("values") or {}, tool_input.get("occurred_at"))
+
+
 def validate_actions(actions: Any, ctx: ToolContext) -> list[dict[str, Any]]:
     """Devuelve las acciones normalizadas o lanza ValueError con un mensaje
     para el modelo. El permiso real se vuelve a comprobar al ejecutar (cada
@@ -72,6 +92,8 @@ def validate_actions(actions: Any, ctx: ToolContext) -> list[dict[str, Any]]:
     if len(actions) > MAX_ACTIONS:
         raise ValueError(f"Máximo {MAX_ACTIONS} acciones por plan; divídelo en dos.")
     clean: list[dict[str, Any]] = []
+    # Si el mismo plan define un tipo, el tipo aún no existe al proponer: no se pre-valida contra él.
+    defines_type = any(isinstance(a, dict) and a.get("tool") == "define_record_type" for a in actions)
     for i, action in enumerate(actions, 1):
         if not isinstance(action, dict):
             raise ValueError(f"Acción {i}: formato inválido.")
@@ -89,6 +111,11 @@ def validate_actions(actions: Any, ctx: ToolContext) -> list[dict[str, Any]]:
         missing = [k for k in spec.input_schema.get("required", []) if k not in tool_input]
         if missing:
             raise ValueError(f"Acción {i} ({name}): faltan campos obligatorios: {', '.join(missing)}.")
+        try:
+            if not defines_type:
+                _dry_validate(name, tool_input, ctx)
+        except ValueError as exc:
+            raise ValueError(f"Acción {i} ({name}): {exc}") from exc
         if not isinstance(label, str) or not label.strip():
             raise ValueError(f"Acción {i} ({name}): falta 'label' (descripción corta para el usuario).")
         clean.append({"tool": name, "input": tool_input, "label": label.strip()[:200]})

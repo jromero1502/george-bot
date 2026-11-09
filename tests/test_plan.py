@@ -222,3 +222,48 @@ def test_lock_released_when_body_raises(store):
         with plans.tenant_lock("t-1"):
             raise RuntimeError("x")
     assert "lock::t-1" not in store.docs
+
+
+# ------------------------------------------------------------ pre-validación al proponer
+_TYPE = {
+    "typeKey": "tareas", "name": "Tareas", "status": "active", "mode": "event", "measureField": "cantidad",
+    "groupField": None, "clientLink": "none",
+    "fields": [
+        {"key": "estado", "label": "Estado", "type": "choice", "choices": ["pendiente", "hecho"], "required": True},
+        {"key": "cantidad", "label": "Cantidad", "type": "number", "required": True},
+    ],
+}
+
+
+def _log(values):
+    return [{"tool": "log_record", "input": {"type_key": "tareas", "values": values}, "label": "Tarea"}]
+
+
+def test_log_record_validated_when_proposed():
+    c = ToolContext(chat_id="c", role="owner", user_name="A", correlation_id="x", tenant_id="t-1", tenant={}, record_types=(_TYPE,))
+    assert plan.validate_actions(_log({"estado": "hecho", "cantidad": 1}), c)
+    with pytest.raises(ValueError, match="estado"):
+        plan.validate_actions(_log({"estado": "terminado", "cantidad": 1}), c)
+    # el mismo plan define el tipo: no se pre-valida contra uno que aún no existe
+    both = [{"tool": "define_record_type", "input": {"name": "Tareas", "fields": [], "mode": "event", "measure_field": "cantidad"}, "label": "Tipo"}] + _log({"estado": "x"})
+    both[0]["input"].update({"fields": []})
+    assert plan.validate_actions(both, c)
+
+
+def test_log_record_unknown_type_rejected(monkeypatch):
+    monkeypatch.setattr(plan.records_repo, "get_record_type", lambda t, k: None)
+    with pytest.raises(ValueError, match="no existe"):
+        plan.validate_actions(_log({"estado": "hecho"}), ctx())
+
+
+# ------------------------------------------------------------ respuesta cuando se corta
+def test_max_tokens_reply_is_honest(monkeypatch):
+    from types import SimpleNamespace
+
+    resp = SimpleNamespace(
+        stop_reason="max_tokens", content=[], usage=SimpleNamespace(input_tokens=1, output_tokens=1)
+    )
+    monkeypatch.setattr(agent, "_get_client", lambda: SimpleNamespace(messages=SimpleNamespace(create=lambda **k: resp)))
+    monkeypatch.setattr(agent, "_chat_system_prompt", lambda c: "p")
+    out = agent.run_agent(ctx(), [], "hola")
+    assert "cortó" in out.reply_text and "hice los cambios" not in out.reply_text

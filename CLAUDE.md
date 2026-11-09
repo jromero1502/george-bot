@@ -391,6 +391,14 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
   clasificarla en `plan.py` (`WRITE_TOOLS` o `IMMEDIATE_TOOLS`; `tests/test_plan.py` falla si falta). Inmediatas a
   propósito: lecturas, `switch_business`/`switch_to_platform_admin` (refrescan contexto a mitad de turno) y
   `drive_send_file`. Los recordatorios/reportes no pasan por este flujo (tienen lista cerrada de tools de lectura).
+- **Presupuesto de salida, esfuerzo y caching del chat (2026-11-09).** Medido en `conversations` (10 días, 233 turnos): 9
+  terminaron en `max_tokens` con 4096 porque el razonamiento de Haiku 5.5 cuenta dentro del tope, y `run_agent`
+  respondía "Listo, hice los cambios" sin haber hecho nada. Ahora `_CHAT_MAX_TOKENS = 16000`, esfuerzo `low` en el chat
+  (`ANTHROPIC_CHAT_EFFORT`, vacío = default del modelo), `cache_control` a nivel de request (system+tools se reusan entre
+  vueltas) y mensajes de corte honestos. `propose_actions` pre-valida `log_record` contra el tipo (25% fallaba por un
+  valor fuera de las opciones): el error llega antes de que el usuario confirme. Colas: `maxPollingInterval` 2 s en
+  `host.json` (el default de 1 min hace esperar al primer mensaje tras un rato inactivo); no había backlog (máx. 1
+  mensaje en cola en 3 días), el retraso de cola es de polling y arranque en frío, no de throughput.
 - **Lock por tenant (`plans_repo.tenant_lock`).** `process_update` y `action_worker` toman el mismo lock (clave =
   `tenantId`, o `chat:<id>` sin tenant) para procesar de a un mensaje por negocio; `host.json` ya serializa cada cola,
   pero no una contra otra. Es un lease en Cosmos (`lock::<clave>` en `platformConfig`, crear = tomar, ETag para

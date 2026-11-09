@@ -149,6 +149,52 @@ def derive_period(occurred_at: str) -> str:
     return f"{dt.year:04d}-{dt.month:02d}"
 
 
+PERIOD_GROUP = "period"
+
+
+def validate_query(
+    type_def: dict[str, Any], group_by: Optional[str], filters: Optional[dict[str, Any]]
+) -> tuple[Optional[str], list[tuple[str, Any]]]:
+    """Validates a dynamic group_by/filters pair against the type's declared
+    fields. This is the injection boundary: repositories/records.py interpolates
+    field keys into the Cosmos query text (Cosmos can't parametrize a property
+    path), so only keys that exist in `type_def['fields']` (which already match
+    _KEY_RE) may get through. Filter values are coerced to the field's type and
+    always travel as query parameters. Returns (group_by, [(key, value), ...]);
+    group_by is None (use the type's own groupField), 'period', or a field key.
+    Raises ValueError."""
+    fields_by_key = {f["key"]: f for f in type_def["fields"]}
+    valid = ", ".join(fields_by_key)
+
+    if group_by in (None, ""):
+        group = None
+    elif group_by == PERIOD_GROUP or group_by in fields_by_key:
+        group = group_by
+    else:
+        raise ValueError(f"group_by invalido: {group_by!r}. Usa 'period' o uno de: {valid}.")
+
+    if filters is not None and not isinstance(filters, dict):
+        raise ValueError("'filters' debe ser un objeto {campo: valor}.")
+    pairs: list[tuple[str, Any]] = []
+    for key, raw in (filters or {}).items():
+        field = fields_by_key.get(key)
+        if field is None:
+            raise ValueError(f"No se puede filtrar por {key!r}: no es un campo del tipo. Campos validos: {valid}.")
+        if field["type"] == "number":
+            try:
+                value: Any = float(raw)
+            except (TypeError, ValueError):
+                raise ValueError(f"El filtro {key!r} debe ser numerico (recibido {raw!r}).") from None
+        elif field["type"] == "boolean":
+            if not isinstance(raw, bool):
+                raise ValueError(f"El filtro {key!r} debe ser verdadero/falso (recibido {raw!r}).")
+            value = raw
+        else:
+            value = str(raw)
+        pairs.append((key, value))
+    return group, pairs
+
+
 def coerce_values(
     type_def: dict[str, Any], values_in: dict[str, Any], occurred_at_in: Optional[str] = None
 ) -> tuple[dict[str, Any], float, str, str, str]:

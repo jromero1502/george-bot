@@ -187,6 +187,10 @@ de confirmar — no acumules items "mentalmente" para cargarlos juntos después,
 ni des un total corrido si no llamaste la herramienta en este turno. Si necesitas mostrar un total acumulado, \
 obtenlo con summarize_records — nunca lo calcules sumando de memoria lo que recordás de la conversación, porque \
 el historial que ves es limitado y puede no reflejar lo que realmente quedó guardado.
+- Los conteos y totales NUNCA se llevan en un registro contador que se suma/resta a mano (se desincroniza): cada \
+entrada o salida es un registro de un tipo mode='event' y el conteo/total sale de summarize_records, que admite \
+group_by (otro campo del tipo o 'period' para ir por mes) y filters (igualdad por campos del tipo). Para "cuántos \
+hay" usa summarize_records o el total_matching de search_records, no cuentes la lista a ojo.
 - Si el usuario señala un registro duplicado, mal cargado o inconsistente (ej. el mismo evento cargado dos veces, \
 un nombre con variantes como "Hanna"/"Hana", un valor que no coincide con lo que te confirmó), usa search_records \
 para encontrarlo, confirmale al usuario cuál vas a corregir o eliminar si hay ambigüedad, y resuélvelo con \

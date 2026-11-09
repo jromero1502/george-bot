@@ -21,6 +21,7 @@ _USE_ROLES = ("owner", "admin", "walker")
 # restricted tighter than logging a new one — same split as finance.py's
 # write tools (owner/admin only, no walker).
 _EDIT_ROLES = ("owner", "admin")
+_SEARCH_LIMIT = 25
 
 
 def _client_name(tenant_id: str, client_id: str) -> str:
@@ -174,16 +175,32 @@ def _delete_record(input_: dict[str, Any], ctx: ToolContext) -> str:
 def _search_records(input_: dict[str, Any], ctx: ToolContext) -> str:
     require_role(ctx, _USE_ROLES, "search_records")
     tenant_id = require_tenant(ctx)
-    results = records_repo.search_records(
-        tenant_id,
-        type_key=input_.get("type_key"),
+    type_key = input_.get("type_key")
+    value_filters: list[tuple[str, Any]] = []
+    if input_.get("filters"):
+        if not type_key:
+            raise ToolError("Para usar 'filters' indica también type_key.")
+        type_def = records_repo.get_record_type(tenant_id, type_key)
+        if type_def is None:
+            raise ToolError(f"No existe un tipo de registro con type_key={type_key!r} en este negocio.")
+        try:
+            _, value_filters = record_schema.validate_query(type_def, None, input_["filters"])
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+    query = dict(
+        type_key=type_key,
         client_id=input_.get("client_id"),
         group_key=input_.get("group_key"),
         period=input_.get("period"),
         since=input_.get("since"),
         until=input_.get("until"),
-        limit=25,
+        value_filters=value_filters,
     )
+    results = records_repo.search_records(tenant_id, limit=_SEARCH_LIMIT + 1, **query)
+    shown = results[:_SEARCH_LIMIT]
+    # When there are more matches than we list, say how many, so the model
+    # never reports len(records) as if it were the real count.
+    total = len(results) if len(results) <= _SEARCH_LIMIT else records_repo.count_records(tenant_id, **query)
     slim = [
         {
             "id": r["id"],
@@ -194,9 +211,12 @@ def _search_records(input_: dict[str, Any], ctx: ToolContext) -> str:
             "values": r.get("values"),
             "notes": r.get("notes"),
         }
-        for r in results
+        for r in shown
     ]
-    return json.dumps({"records": slim}, ensure_ascii=False)
+    return json.dumps(
+        {"records": slim, "total_matching": total, "listed": len(slim), "truncated": total > len(slim)},
+        ensure_ascii=False,
+    )
 
 
 def _summarize_records(input_: dict[str, Any], ctx: ToolContext) -> str:
@@ -206,19 +226,37 @@ def _summarize_records(input_: dict[str, Any], ctx: ToolContext) -> str:
     type_def = records_repo.get_record_type(tenant_id, type_key)
     if type_def is None:
         raise ToolError(f"No existe un tipo de registro con type_key={type_key!r} en este negocio.")
-    summary = records_repo.summarize_records(
-        tenant_id, type_def["typeKey"], type_def["mode"], since=input_.get("since"), until=input_.get("until")
+    try:
+        group_by, value_filters = record_schema.validate_query(type_def, input_.get("group_by"), input_.get("filters"))
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+    result = records_repo.summarize_records(
+        tenant_id,
+        type_def["typeKey"],
+        type_def["mode"],
+        since=input_.get("since"),
+        until=input_.get("until"),
+        client_id=input_.get("client_id"),
+        period=input_.get("period"),
+        value_filters=value_filters,
+        group_by=group_by,
+        type_group_field=type_def.get("groupField"),
     )
-    return json.dumps(
-        {
-            "typeKey": type_def["typeKey"],
-            "mode": type_def["mode"],
-            "measureField": type_def.get("measureField"),
-            "groupField": type_def.get("groupField"),
-            "summary": summary,
-        },
-        ensure_ascii=False,
-    )
+    out: dict[str, Any] = {
+        "typeKey": type_def["typeKey"],
+        "mode": type_def["mode"],
+        "measureField": type_def.get("measureField"),
+        "groupedBy": group_by or type_def.get("groupField") or "total",
+        "summary": result["summary"],
+    }
+    if result["ungrouped"]:
+        out["ungrouped"] = result["ungrouped"]  # records without a value for the group_by field
+    if result["truncated"]:
+        out["warning"] = (
+            "Hay mas registros de los que se pudieron leer: este resultado es PARCIAL. "
+            "Dilo al usuario y acota con since/until o filters."
+        )
+    return json.dumps(out, ensure_ascii=False)
 
 
 TOOLS = [
@@ -350,7 +388,11 @@ TOOLS = [
     ),
     ToolSpec(
         name="search_records",
-        description="Busca el historico de registros de un tipo, opcionalmente filtrando por cliente, grupo o periodo.",
+        description=(
+            "Busca el historico de registros de un tipo, opcionalmente filtrando por cliente, grupo, periodo o por "
+            "cualquier campo del tipo (filters, requiere type_key). Lista hasta 25 registros; 'total_matching' es "
+            "el conteo REAL de coincidencias — usalo para 'cuantos hay', nunca cuentes la lista."
+        ),
         input_schema={
             "type": "object",
             "properties": {
@@ -360,6 +402,10 @@ TOOLS = [
                 "period": {"type": "string", "description": "YYYY-MM"},
                 "since": {"type": "string", "description": "ISO 8601"},
                 "until": {"type": "string", "description": "ISO 8601"},
+                "filters": {
+                    "type": "object",
+                    "description": "Igualdad exacta por campos del tipo, {key_del_campo: valor}. Ej. {\"vendedor\": \"Ana\"}",
+                },
             },
             "required": [],
             "additionalProperties": False,
@@ -372,7 +418,10 @@ TOOLS = [
         description=(
             "Resume los registros de un tipo por grupo: si el tipo es mode='snapshot' devuelve el valor mas "
             "reciente por grupo (ej. stock actual por sabor); si es mode='event' devuelve el total acumulado y la "
-            "cantidad de registros por grupo en el rango dado (ej. asistencias del mes por perro)."
+            "cantidad de registros por grupo en el rango dado (ej. asistencias del mes por perro). Por defecto "
+            "agrupa por el group_field del tipo; con group_by puedes agrupar por otro campo del tipo o por "
+            "'period' (mes, YYYY-MM), y con filters/client_id/period restringes que registros entran. Este es "
+            "el unico origen valido para conteos y totales: no los calcules a mano ni mantengas contadores."
         ),
         input_schema={
             "type": "object",
@@ -380,6 +429,13 @@ TOOLS = [
                 "type_key": {"type": "string"},
                 "since": {"type": "string", "description": "ISO 8601"},
                 "until": {"type": "string", "description": "ISO 8601"},
+                "group_by": {"type": "string", "description": "'period' o la key de un campo del tipo"},
+                "filters": {
+                    "type": "object",
+                    "description": "Igualdad exacta por campos del tipo, {key_del_campo: valor}. Ej. {\"vendedor\": \"Ana\"}",
+                },
+                "client_id": {"type": "string"},
+                "period": {"type": "string", "description": "YYYY-MM"},
             },
             "required": ["type_key"],
             "additionalProperties": False,

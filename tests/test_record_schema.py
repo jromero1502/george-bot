@@ -232,3 +232,40 @@ def test_coerce_values_rejects_invalid_occurred_at():
     type_def = record_schema.validate_type_definition(_stock_type_input())
     with pytest.raises(ValueError):
         record_schema.coerce_values(type_def, {"sabor": "carne", "cantidad": 10}, "no es una fecha")
+
+
+# ---------------------------------------------------------------------------
+# validate_query (dynamic group_by / filters — the injection boundary)
+# ---------------------------------------------------------------------------
+def _type_def():
+    return record_schema.validate_type_definition(_stock_type_input())
+
+
+def test_validate_query_defaults():
+    assert record_schema.validate_query(_type_def(), None, None) == (None, [])
+
+
+def test_validate_query_accepts_field_period_and_typed_filters():
+    group, pairs = record_schema.validate_query(_type_def(), "period", {"sabor": "carne", "cantidad": "5"})
+    assert group == "period"
+    assert pairs == [("sabor", "carne"), ("cantidad", 5.0)]
+    assert record_schema.validate_query(_type_def(), "sabor", None)[0] == "sabor"
+
+
+@pytest.mark.parametrize("bad", ['sabor"] OR 1=1 --', "values", "c.id", "SABOR", "nope"])
+def test_validate_query_rejects_undeclared_group_by(bad):
+    with pytest.raises(ValueError):
+        record_schema.validate_query(_type_def(), bad, None)
+
+
+@pytest.mark.parametrize("bad", ['sabor"] OR 1=1 --', "nope", "id"])
+def test_validate_query_rejects_undeclared_filter_key(bad):
+    with pytest.raises(ValueError):
+        record_schema.validate_query(_type_def(), None, {bad: "x"})
+
+
+def test_validate_query_rejects_bad_filter_values():
+    with pytest.raises(ValueError):
+        record_schema.validate_query(_type_def(), None, {"cantidad": "mucho"})
+    with pytest.raises(ValueError):
+        record_schema.validate_query(_type_def(), None, "sabor=carne")

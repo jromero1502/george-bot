@@ -10,6 +10,7 @@ the validation that produces `type_def` before it reaches this module.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 from azure.cosmos import exceptions
@@ -18,6 +19,7 @@ from george.repositories.cosmos import get_container
 from george.util import new_id, utc_now_iso
 
 _DEFAULT_SUMMARY_LIMIT = 500
+_SAFE_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 
 
 def _container():
@@ -114,16 +116,25 @@ def create_record(
     return _container().create_item(doc)
 
 
-def search_records(
-    tenant_id: str,
-    type_key: Optional[str] = None,
-    client_id: Optional[str] = None,
-    group_key: Optional[str] = None,
-    period: Optional[str] = None,
-    since: Optional[str] = None,
-    until: Optional[str] = None,
-    limit: int = 50,
-) -> list[dict[str, Any]]:
+def _value_path(key: str) -> str:
+    """Property path for a field inside `values`. Cosmos SQL cannot parametrize
+    a property name, so the key is interpolated. Callers MUST have passed it
+    through record_schema.validate_query (only declared field keys, which match
+    ^[a-z][a-z0-9_]{0,39}$); this re-check is defense in depth."""
+    if not _SAFE_KEY_RE.match(key):
+        raise ValueError(f"Clave de campo invalida: {key!r}")
+    return f'c.values["{key}"]'
+
+
+def _where(
+    type_key: Optional[str],
+    client_id: Optional[str],
+    group_key: Optional[str],
+    period: Optional[str],
+    since: Optional[str],
+    until: Optional[str],
+    value_filters: Optional[list[tuple[str, Any]]],
+) -> tuple[list[str], list[dict[str, Any]]]:
     clauses = ["c.docType = 'record'"]
     params: list[dict[str, Any]] = []
 
@@ -145,9 +156,54 @@ def search_records(
     if until:
         clauses.append("c.occurredAt <= @until")
         params.append({"name": "@until", "value": until})
+    for i, (key, value) in enumerate(value_filters or []):
+        clauses.append(f"{_value_path(key)} = @vf{i}")
+        params.append({"name": f"@vf{i}", "value": value})
+    return clauses, params
 
+
+def search_records(
+    tenant_id: str,
+    type_key: Optional[str] = None,
+    client_id: Optional[str] = None,
+    group_key: Optional[str] = None,
+    period: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    limit: int = 50,
+    value_filters: Optional[list[tuple[str, Any]]] = None,
+) -> list[dict[str, Any]]:
+    clauses, params = _where(type_key, client_id, group_key, period, since, until, value_filters)
     query = f"SELECT TOP {int(limit)} * FROM c WHERE {' AND '.join(clauses)} ORDER BY c.occurredAt DESC"
     return list(_container().query_items(query=query, parameters=params, partition_key=tenant_id))
+
+
+def count_records(
+    tenant_id: str,
+    type_key: Optional[str] = None,
+    client_id: Optional[str] = None,
+    group_key: Optional[str] = None,
+    period: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    value_filters: Optional[list[tuple[str, Any]]] = None,
+) -> int:
+    clauses, params = _where(type_key, client_id, group_key, period, since, until, value_filters)
+    query = f"SELECT VALUE COUNT(1) FROM c WHERE {' AND '.join(clauses)}"
+    rows = list(_container().query_items(query=query, parameters=params, partition_key=tenant_id))
+    return int(rows[0]) if rows else 0
+
+
+def _group_expr(group_by: Optional[str], type_group_field: Optional[str]) -> str:
+    if group_by is None or group_by == type_group_field:
+        return "c.groupKey"  # denormalized, same value as values[groupField]
+    if group_by == "period":
+        return "c.period"
+    return _value_path(group_by)
+
+
+def _sort_key(bucket: dict[str, Any]) -> str:
+    return "" if bucket["groupKey"] is None else str(bucket["groupKey"])
 
 
 def summarize_records(
@@ -156,35 +212,78 @@ def summarize_records(
     mode: str,
     since: Optional[str] = None,
     until: Optional[str] = None,
-) -> list[dict[str, Any]]:
-    """Reduces recent records of one type into a per-group summary in Python
-    rather than a Cosmos GROUP BY: `mode='snapshot'` wants the single most
-    recent record per group (a self-join Cosmos SQL can't express directly),
-    and at the data volumes this bot deals with (small businesses, one query
-    per report) fetching up to _DEFAULT_SUMMARY_LIMIT records and reducing
-    them here is simpler than two different aggregation queries."""
-    records = search_records(
-        tenant_id, type_key=type_key, since=since, until=until, limit=_DEFAULT_SUMMARY_LIMIT
-    )
+    client_id: Optional[str] = None,
+    period: Optional[str] = None,
+    value_filters: Optional[list[tuple[str, Any]]] = None,
+    group_by: Optional[str] = None,
+    type_group_field: Optional[str] = None,
+) -> dict[str, Any]:
+    """Returns {"summary": [...], "truncated": bool, "ungrouped": {...}|None}.
+
+    `mode='event'` aggregates in Cosmos (COUNT/SUM ... GROUP BY), so there is
+    no row cap and no silent truncation. Records missing the group_by field
+    (an optional field left empty) are dropped by Cosmos' GROUP BY, so a second
+    ungrouped total is taken and the difference is reported as `ungrouped`.
+
+    `mode='snapshot'` wants the single most recent record per group, a
+    self-join Cosmos SQL can't express, so it reduces in Python over up to
+    _DEFAULT_SUMMARY_LIMIT records and says so via `truncated` if there were
+    more."""
+    expr = _group_expr(group_by, type_group_field)
+    clauses, params = _where(type_key, client_id, None, period, since, until, value_filters)
+    where = " AND ".join(clauses)
 
     if mode == "snapshot":
-        latest: dict[str, dict[str, Any]] = {}
-        for record in records:  # already ordered by occurredAt DESC
-            group_key = record.get("groupKey")
-            if group_key not in latest:
-                latest[group_key] = record
-        return [
-            {"groupKey": group_key, "amount": record.get("amount"), "occurredAt": record.get("occurredAt")}
-            for group_key, record in sorted(latest.items())
-        ]
+        records = search_records(
+            tenant_id,
+            type_key=type_key,
+            client_id=client_id,
+            period=period,
+            since=since,
+            until=until,
+            limit=_DEFAULT_SUMMARY_LIMIT + 1,
+            value_filters=value_filters,
+        )
+        truncated = len(records) > _DEFAULT_SUMMARY_LIMIT
+        records = records[:_DEFAULT_SUMMARY_LIMIT]
 
-    totals: dict[str, dict[str, Any]] = {}
-    for record in records:
-        group_key = record.get("groupKey")
-        bucket = totals.setdefault(group_key, {"groupKey": group_key, "total": 0.0, "count": 0})
-        bucket["total"] += record.get("amount") or 0.0
-        bucket["count"] += 1
-    return sorted(totals.values(), key=lambda bucket: bucket["groupKey"])
+        def group_of(record: dict[str, Any]) -> Any:
+            if expr == "c.groupKey":
+                return record.get("groupKey")
+            if expr == "c.period":
+                return record.get("period")
+            return (record.get("values") or {}).get(group_by)
+
+        latest: dict[Any, dict[str, Any]] = {}
+        for record in records:  # already ordered by occurredAt DESC
+            latest.setdefault(group_of(record), record)
+        summary = [
+            {"groupKey": key, "amount": record.get("amount"), "occurredAt": record.get("occurredAt")}
+            for key, record in latest.items()
+        ]
+        return {"summary": sorted(summary, key=_sort_key), "truncated": truncated, "ungrouped": None}
+
+    grouped_query = (
+        f"SELECT {expr} AS groupKey, COUNT(1) AS n, SUM(c.amount) AS total "
+        f"FROM c WHERE {where} GROUP BY {expr}"
+    )
+    rows = list(_container().query_items(query=grouped_query, parameters=params, partition_key=tenant_id))
+    summary = [
+        {"groupKey": row.get("groupKey"), "total": float(row.get("total") or 0.0), "count": int(row["n"])}
+        for row in rows
+    ]
+
+    totals_query = f"SELECT COUNT(1) AS n, SUM(c.amount) AS total FROM c WHERE {where}"
+    totals = list(_container().query_items(query=totals_query, parameters=params, partition_key=tenant_id))
+    ungrouped = None
+    if totals:
+        missing = int(totals[0]["n"]) - sum(b["count"] for b in summary)
+        if missing > 0:
+            ungrouped = {
+                "count": missing,
+                "total": float(totals[0].get("total") or 0.0) - sum(b["total"] for b in summary),
+            }
+    return {"summary": sorted(summary, key=_sort_key), "truncated": False, "ungrouped": ungrouped}
 
 
 def get_record(tenant_id: str, record_id: str) -> Optional[dict[str, Any]]:

@@ -10,6 +10,8 @@ var queueNames = [
   'george-incoming-poison'
   'george-reminders'
   'george-reminders-poison'
+  'george-actions'
+  'george-actions-poison'
 ]
 
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {

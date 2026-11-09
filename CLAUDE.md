@@ -376,6 +376,27 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
     no depender de que el modelo se acuerde de una regla de prompt. Riesgo residual: el texto OCR de una foto
     entra como mensaje del usuario y no está cubierto por este guard.
 
+- **Escrituras = propón -> confirma -> ejecuta (`plan.py`, `tools/plan_tools.py`, `repositories/plans.py`; desde 2026-11-09).**
+  Motivo: George a veces "no ejecutaba las tools" (confirmaba sin llamarlas) y los parches de prompt/`_VERIFY_NUDGE` no
+  eran una garantía. Ahora en el chat el modelo solo CONSULTA y PROPONE: las tools de `plan.WRITE_TOOLS` no corren en el
+  turno (`agent._plan_flow_block` devuelve error mecánico), se incluyen en `propose_actions` (valida tool/rol/campos
+  obligatorios/label y guarda `plan::<chatId>` en `platformConfig`, estado `pending`, TTL 2 h). El plan pendiente se
+  inyecta en el prompt del turno siguiente; si el usuario aprueba, `confirm_pending` lo pasa a `confirmed` (nunca en el
+  mismo turno que `propose_actions`, bloqueado en código) y `process_update` encola `{chatId}` en `george-actions` vía
+  output binding. `action_worker` toma el lock, pasa a `running` con ETag, reconstruye el `ToolContext` (si cambió
+  tenant/rol desde la propuesta NO ejecuta) y corre las acciones con `registry.dispatch` **sin modelo**; el mensaje de
+  resultado sale de lo que las tools devolvieron (`plan.format_results`) y se guarda en `conversations` con
+  `direction="execution"`. At-most-once: si una ejecución `running` se reintenta, no se repite, se avisa al usuario.
+  Limitación: una acción no puede usar el id que crea otra del mismo plan (se propone en dos pasos). Tool nueva =
+  clasificarla en `plan.py` (`WRITE_TOOLS` o `IMMEDIATE_TOOLS`; `tests/test_plan.py` falla si falta). Inmediatas a
+  propósito: lecturas, `switch_business`/`switch_to_platform_admin` (refrescan contexto a mitad de turno) y
+  `drive_send_file`. Los recordatorios/reportes no pasan por este flujo (tienen lista cerrada de tools de lectura).
+- **Lock por tenant (`plans_repo.tenant_lock`).** `process_update` y `action_worker` toman el mismo lock (clave =
+  `tenantId`, o `chat:<id>` sin tenant) para procesar de a un mensaje por negocio; `host.json` ya serializa cada cola,
+  pero no una contra otra. Es un lease en Cosmos (`lock::<clave>` en `platformConfig`, crear = tomar, ETag para
+  adueñarse de uno vencido, TTL 5 min) y no un blob lease: evita una dependencia nueva y no necesita infra. Espera hasta
+  150 s y si no, `LockBusy` -> el mensaje reintenta por la cola (cuenta hacia `maxDequeueCount`).
+
 ## Decisiones que no son obvias leyendo el código
 
 - **`main.bicep` es subscription-scope y crea el resource group él mismo** (recurso

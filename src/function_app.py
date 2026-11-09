@@ -13,13 +13,14 @@ from typing import Any, List, Optional
 
 import azure.functions as func
 
-from george import context, telegram
+from george import context, plan, telegram
 from george.agent import AgentResult, generate_reminder_message, generate_report_message, run_agent
 from george.config import estimate_cost_usd, settings
 from george.document_intelligence import extract_text as extract_image_text
 from george.groq_stt import transcribe
 from george.repositories import chats as chats_repo
 from george.repositories import conversations as conversations_repo
+from george.repositories import plans as plans_repo
 from george.repositories import reminders as reminders_repo
 from george.repositories import tenants as tenants_repo
 from george.repositories.cosmos import get_database
@@ -34,6 +35,7 @@ logger = logging.getLogger("george")
 app = func.FunctionApp()
 
 _POISON_QUEUE = f"{settings.queue_incoming}-poison"
+_ACTIONS_POISON_QUEUE = f"{settings.queue_actions}-poison"
 _STALE_REMINDER_SECONDS = 30 * 60
 
 
@@ -137,16 +139,11 @@ def _history_to_messages(history_docs: list[dict[str, Any]], group: bool = False
 
 
 @app.queue_trigger(arg_name="msg", queue_name=settings.queue_incoming, connection="AzureWebJobsStorage")
-def process_update(msg: func.QueueMessage) -> None:
+@app.queue_output(arg_name="actionMsg", queue_name=settings.queue_actions, connection="AzureWebJobsStorage")
+def process_update(msg: func.QueueMessage, actionMsg: func.Out[str]) -> None:
     payload = json.loads(msg.get_body().decode("utf-8"))
     chat_id = payload["chatId"]
-    update_id = payload.get("updateId")
     message = payload["message"]
-    correlation_id = new_id()
-
-    if update_id is not None and conversations_repo.already_processed(chat_id, update_id):
-        logger.info("process_update: update %s for chat %s already processed, skipping", update_id, chat_id)
-        return
 
     chat = chats_repo.is_authorized(chat_id)
     if chat is None:
@@ -154,10 +151,38 @@ def process_update(msg: func.QueueMessage) -> None:
         return
 
     user_name = (message.get("from") or {}).get("first_name") or chat.get("name") or chat_id
-    ctx, error_message = context.build_context(chat_id, user_name, correlation_id, chat=chat)
+    ctx, error_message = context.build_context(chat_id, user_name, new_id(), chat=chat)
     if error_message:
         logger.warning("process_update: chat %s could not resolve role/tenant: %s", chat_id, error_message)
         telegram.send_message(chat_id, error_message)
+        return
+
+    # De a un mensaje por tenant: el turno completo (y la ejecución de planes,
+    # ver action_worker) corre bajo el mismo lock. Si no se libera a tiempo,
+    # LockBusy sube y el mensaje vuelve a la cola por el reintento normal.
+    with plans_repo.tenant_lock(_lock_key(ctx.tenant_id, chat_id)):
+        _process_update_locked(msg, actionMsg, payload, chat_id, message, user_name, ctx)
+
+
+def _lock_key(tenant_id: Optional[str], chat_id: str) -> str:
+    return tenant_id or f"chat:{chat_id}"
+
+
+def _process_update_locked(
+    msg: func.QueueMessage,
+    actionMsg: func.Out[str],
+    payload: dict[str, Any],
+    chat_id: str,
+    message: dict[str, Any],
+    user_name: str,
+    ctx: ToolContext,
+) -> None:
+    update_id = payload.get("updateId")
+    correlation_id = ctx.correlation_id
+
+    # Dentro del lock a propósito: una redelivery no puede adelantarse al intento original.
+    if update_id is not None and conversations_repo.already_processed(chat_id, update_id):
+        logger.info("process_update: update %s for chat %s already processed, skipping", update_id, chat_id)
         return
 
     telegram.send_chat_action(chat_id, "typing")
@@ -247,6 +272,11 @@ def process_update(msg: func.QueueMessage) -> None:
 
     telegram.send_message(chat_id, result.reply_text, reply_to_message_id=message.get("message_id"))
 
+    # confirm_pending dejó el plan en estado "confirmed": se ejecuta en otro
+    # mensaje de cola (action_worker), con el acuse de arriba ya enviado.
+    if any(c["name"] == "confirm_pending" and c["ok"] for c in result.tool_calls):
+        actionMsg.set(json.dumps({"chatId": chat_id, "replyTo": message.get("message_id")}))
+
     conversations_repo.create_conversation(
         chat_id,
         # From `result`, not the `ctx` built above: if the turn called
@@ -280,6 +310,74 @@ def process_update(msg: func.QueueMessage) -> None:
             "updateId": update_id,
             "attempt": msg.dequeue_count,
         },
+        error=None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Action worker — ejecuta el plan que el usuario confirmó. Sin modelo: corre
+# las acciones guardadas tal cual (george/plan.py::run_plan) y reporta lo que
+# las tools realmente devolvieron.
+# ---------------------------------------------------------------------------
+@app.queue_trigger(arg_name="msg", queue_name=settings.queue_actions, connection="AzureWebJobsStorage")
+def action_worker(msg: func.QueueMessage) -> None:
+    payload = json.loads(msg.get_body().decode("utf-8"))
+    chat_id = payload["chatId"]
+
+    pending = plans_repo.get_plan(chat_id)
+    if pending is None:
+        logger.warning("action_worker: no plan for chat %s", chat_id)
+        return
+
+    with plans_repo.tenant_lock(_lock_key(pending.get("tenantId"), chat_id)):
+        current = plans_repo.get_plan(chat_id)
+        if current is None:
+            return
+        if current.get("status") == "running":
+            # El intento anterior murió a medias. Re-ejecutar podría duplicar lo ya
+            # hecho, así que NO se reintenta: se avisa para que lo verifiquen.
+            plans_repo.transition(current, "done", interrupted=True)
+            telegram.send_message(
+                chat_id,
+                "⚠️ La ejecución se interrumpió a la mitad y no puedo asegurar qué quedó hecho. "
+                "Revisa los datos antes de repetirla.",
+            )
+            return
+        if current.get("status") != "confirmed":
+            logger.info("action_worker: plan for chat %s is %s, nothing to do", chat_id, current.get("status"))
+            return
+        running = plans_repo.transition(current, "running")
+        if running is None:
+            return
+
+        correlation_id = new_id()
+        ctx, _error = context.build_context(chat_id, running.get("userName") or chat_id, correlation_id)
+        if ctx is None or ctx.tenant_id != running.get("tenantId") or ctx.role != running.get("role"):
+            # Entre la propuesta y la ejecución cambió el negocio activo o el rol: no se ejecuta a ciegas.
+            plans_repo.transition(running, "done", failed="context_changed")
+            telegram.send_message(
+                chat_id,
+                "❌ No ejecuté el plan porque cambió el negocio activo o tu rol desde que lo propuse. "
+                "Pídemelo de nuevo.",
+            )
+            return
+
+        results, audit = plan.run_plan(running, ctx)
+        text = plan.format_results(results)
+        plans_repo.transition(running, "done", results=[{"label": r["label"], "ok": r["ok"]} for r in results])
+
+    telegram.send_message(chat_id, text, reply_to_message_id=payload.get("replyTo"))
+    conversations_repo.create_conversation(
+        chat_id,
+        tenantId=ctx.tenant_id,
+        userId="system",
+        userName="George",
+        role=ctx.role,
+        direction="execution",
+        input={"type": "execution", "text": None, "transcript": None},
+        output={"text": text},
+        toolCalls=audit,
+        trace={"correlationId": correlation_id, "planId": running.get("planId"), "attempt": msg.dequeue_count},
         error=None,
     )
 
@@ -450,6 +548,22 @@ def poison_handler(msg: func.QueueMessage) -> None:
     telegram.send_message(
         settings.platform_admin_chat_id,
         f"⚠️ Un mensaje del chat {chat_id} falló al procesarse después de varios intentos. Revisa los logs.",
+    )
+
+
+@app.queue_trigger(arg_name="msg", queue_name=_ACTIONS_POISON_QUEUE, connection="AzureWebJobsStorage")
+def actions_poison_handler(msg: func.QueueMessage) -> None:
+    body = msg.get_body().decode("utf-8", errors="replace")
+    logger.error("actions_poison_handler: plan execution dead-lettered: %s", body)
+    try:
+        chat_id = json.loads(body).get("chatId")
+    except (ValueError, AttributeError):
+        chat_id = None
+    if chat_id:
+        telegram.send_message(chat_id, "❌ No pude ejecutar lo que confirmaste. Revisa qué quedó guardado y vuelve a pedirlo.")
+    telegram.send_message(
+        settings.platform_admin_chat_id,
+        f"⚠️ Un plan confirmado del chat {chat_id or 'desconocido'} falló después de varios intentos. Revisa los logs.",
     )
 
 

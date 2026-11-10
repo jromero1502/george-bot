@@ -197,7 +197,19 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
   `warning`/`truncated` en vez de truncar en silencio. Motivo: un owner quería llevar un conteo
   con un registro contador +1/-1, que se desincroniza; el patrón correcto es un tipo `event` y
   contar con `summarize_records` (el prompt lo dice). Las queries de agregación no se pudieron
-  probar contra un emulador de Cosmos: la primera prueba real es en producción. El prompt (`prompts.py`) inyecta
+  probar contra un emulador de Cosmos: la primera prueba real es en producción.
+  **`dateField` (2026-11-10) — falso positivo real en reportes.** `period`/`since`/`until` salen de
+  `occurredAt`, que por defecto es la fecha de CARGA. En `compras_de_mercado` el owner declaró su
+  propia `fecha_compra` y un campo de texto `periodo`; 12 compras de octubre cargadas el 10/11
+  quedaron con `period=2026-11`, inflaron noviembre ($335.686 + octubre) y `period="2026-10"`
+  devolvía 0. George además afirmaba "no puedo filtrar por periodo" porque no entendía por qué
+  `periodo` (campo) y `period` (columna del sistema) no coincidían. Arreglo: el tipo puede declarar
+  `date_field` (campo `date`, forzado `required`); `coerce_values` deriva `occurredAt`/`period` de
+  él (gana sobre cualquier `occurred_at` del llamador; fecha sola -> mediodía UTC) y
+  `define_record_type` realinea los registros existentes (`rederive_dates`). Sin `date_field`,
+  search/summarize agregan una `nota` cuando se usa since/until/period sobre un tipo con campos
+  `date` propios, para que no parezca un reporte válido por esa fecha. Un tipo ya existente solo se
+  corrige cuando el owner vuelve a llamar `define_record_type` con `date_field`. El prompt (`prompts.py`) inyecta
   los tipos activos del tenant en `ToolContext.record_types` (cargados una vez por mensaje en
   `function_app.process_update`, igual que `ctx.tenant`) para que George sepa qué existe sin
   gastar un turno en `list_record_types`, y tiene una regla explícita de detección proactiva:

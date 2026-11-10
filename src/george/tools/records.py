@@ -8,7 +8,7 @@ is no per-business-type code here.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Optional
 
 from george import record_schema
 from george.repositories import clients as clients_repo
@@ -40,6 +40,7 @@ def _slim_type(type_def: dict[str, Any]) -> dict[str, Any]:
         "clientLink": type_def.get("clientLink"),
         "measureField": type_def.get("measureField"),
         "groupField": type_def.get("groupField"),
+        "dateField": type_def.get("dateField"),
         "fields": [
             {"key": f["key"], "label": f["label"], "type": f["type"], "required": f["required"], "choices": f.get("choices")}
             for f in type_def.get("fields", [])
@@ -55,7 +56,29 @@ def _define_record_type(input_: dict[str, Any], ctx: ToolContext) -> str:
     except ValueError as exc:
         raise ToolError(str(exc)) from exc
     result = records_repo.upsert_record_type(tenant_id, type_def, ctx.chat_id, status=input_.get("status"))
-    return json.dumps(_slim_type(result), ensure_ascii=False)
+    out = _slim_type(result)
+    if result.get("dateField"):
+        # Existing records were stamped with their load date; move them to the month they belong to.
+        out["recordsRealigned"] = records_repo.rederive_dates(tenant_id, result)
+    return json.dumps(out, ensure_ascii=False)
+
+
+def _date_note(type_def: dict[str, Any]) -> Optional[str]:
+    """since/until/period/group_by='period' follow the record's date. Without a
+    dateField that is the LOAD date, which silently disagrees with any date
+    field the owner declared (e.g. fecha_compra) — say so instead of letting a
+    report look right while counting purchases in the wrong month."""
+    if type_def.get("dateField"):
+        return None
+    own_dates = [f["key"] for f in type_def.get("fields", []) if f["type"] == "date"]
+    if not own_dates:
+        return None
+    return (
+        "since/until/period y group_by='period' usan la fecha de CARGA del registro, no "
+        f"{', '.join(own_dates)}. Si el reporte debe ir por esa fecha, el owner puede fijarla con "
+        "define_record_type(date_field=...) (realinea los registros existentes). Mientras tanto, "
+        "filtra con filters sobre el campo del tipo."
+    )
 
 
 def _list_record_types(input_: dict[str, Any], ctx: ToolContext) -> str:
@@ -213,10 +236,18 @@ def _search_records(input_: dict[str, Any], ctx: ToolContext) -> str:
         }
         for r in shown
     ]
-    return json.dumps(
-        {"records": slim, "total_matching": total, "listed": len(slim), "truncated": total > len(slim)},
-        ensure_ascii=False,
-    )
+    out: dict[str, Any] = {
+        "records": slim,
+        "total_matching": total,
+        "listed": len(slim),
+        "truncated": total > len(slim),
+    }
+    if type_key and (query["period"] or query["since"] or query["until"]):
+        type_def = records_repo.get_record_type(tenant_id, type_key)
+        note = _date_note(type_def) if type_def else None
+        if note:
+            out["nota"] = note
+    return json.dumps(out, ensure_ascii=False)
 
 
 def _summarize_records(input_: dict[str, Any], ctx: ToolContext) -> str:
@@ -249,6 +280,9 @@ def _summarize_records(input_: dict[str, Any], ctx: ToolContext) -> str:
         "groupedBy": group_by or type_def.get("groupField") or "total",
         "summary": result["summary"],
     }
+    note = _date_note(type_def)
+    if note and (input_.get("since") or input_.get("until") or input_.get("period") or group_by == "period"):
+        out["nota"] = note
     if result["ungrouped"]:
         out["ungrouped"] = result["ungrouped"]  # records without a value for the group_by field
     if result["truncated"]:
@@ -301,6 +335,15 @@ TOOLS = [
                 },
                 "measure_field": {"type": "string", "description": "key del campo numerico que se suma/lee en los reportes"},
                 "group_field": {"type": "string", "description": "key del campo por el que se agrupan los reportes (opcional)"},
+                "date_field": {
+                    "type": "string",
+                    "description": (
+                        "key de un campo de tipo 'date' que ES la fecha del registro (ej. 'fecha_compra'): con el, "
+                        "since/until/period y los reportes por mes siguen esa fecha en vez de la de carga, y los "
+                        "registros existentes se realinean. Usalo siempre que el tipo tenga su propia fecha; NO "
+                        "crees ademas un campo 'periodo' de texto."
+                    ),
+                },
                 "client_link": {
                     "type": "string",
                     "enum": ["none", "optional", "required"],
@@ -399,7 +442,7 @@ TOOLS = [
                 "type_key": {"type": "string"},
                 "client_id": {"type": "string"},
                 "group_key": {"type": "string"},
-                "period": {"type": "string", "description": "YYYY-MM"},
+                "period": {"type": "string", "description": "YYYY-MM de la FECHA DEL REGISTRO (el date_field del tipo; si no tiene, la fecha de carga). No es un campo propio llamado periodo: para ese usa filters"},
                 "since": {"type": "string", "description": "ISO 8601"},
                 "until": {"type": "string", "description": "ISO 8601"},
                 "filters": {
@@ -435,7 +478,7 @@ TOOLS = [
                     "description": "Igualdad exacta por campos del tipo, {key_del_campo: valor}. Ej. {\"vendedor\": \"Ana\"}",
                 },
                 "client_id": {"type": "string"},
-                "period": {"type": "string", "description": "YYYY-MM"},
+                "period": {"type": "string", "description": "YYYY-MM de la FECHA DEL REGISTRO (el date_field del tipo; si no tiene, la fecha de carga). No es un campo propio llamado periodo: para ese usa filters"},
             },
             "required": ["type_key"],
             "additionalProperties": False,

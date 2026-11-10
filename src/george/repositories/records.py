@@ -71,6 +71,7 @@ def upsert_record_type(
             "fields": type_def["fields"],
             "measureField": type_def["measureField"],
             "groupField": type_def["groupField"],
+            "dateField": type_def.get("dateField"),
             "clientLink": type_def["clientLink"],
         }
     )
@@ -321,6 +322,37 @@ def update_record(
         }
     )
     return _container().replace_item(item=record_id, body=doc)
+
+
+def rederive_dates(tenant_id: str, type_def: dict[str, Any], limit: int = 2000) -> int:
+    """Re-aligns `occurredAt`/`period` of every existing record of a type with
+    its `dateField` (used when define_record_type sets or changes it, so old
+    records stop sitting in the month they were LOADED instead of the month
+    they belong to). Returns how many records changed. Records without a value
+    in the date field are left alone."""
+    from george import record_schema  # local import: record_schema has no Cosmos deps, keep it that way
+
+    if not type_def.get("dateField"):
+        return 0
+    docs = list(
+        _container().query_items(
+            query=f"SELECT TOP {int(limit)} * FROM c WHERE c.docType = 'record' AND c.typeKey = @t",
+            parameters=[{"name": "@t", "value": type_def["typeKey"]}],
+            partition_key=tenant_id,
+        )
+    )
+    changed = 0
+    for doc in docs:
+        occurred_at = record_schema.date_field_occurred_at(type_def, doc.get("values") or {})
+        if not occurred_at:
+            continue
+        period = record_schema.derive_period(occurred_at)
+        if doc.get("occurredAt") == occurred_at and doc.get("period") == period:
+            continue
+        doc.update({"occurredAt": occurred_at, "period": period, "updatedAt": utc_now_iso()})
+        _container().replace_item(item=doc["id"], body=doc)
+        changed += 1
+    return changed
 
 
 def delete_record(tenant_id: str, record_id: str) -> bool:

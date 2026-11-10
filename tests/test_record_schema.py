@@ -269,3 +269,61 @@ def test_validate_query_rejects_bad_filter_values():
         record_schema.validate_query(_type_def(), None, {"cantidad": "mucho"})
     with pytest.raises(ValueError):
         record_schema.validate_query(_type_def(), None, "sabor=carne")
+
+
+# ---------------------------------------------------------------------------
+# date_field: the type's own date drives occurredAt / period
+# ---------------------------------------------------------------------------
+def _purchases_input(**overrides):
+    base = {
+        "name": "Compras",
+        "mode": "event",
+        "fields": [
+            {"key": "producto", "type": "text", "required": True},
+            {"key": "monto", "type": "number", "required": True},
+            {"key": "fecha_compra", "type": "date", "required": False},
+        ],
+        "measure_field": "monto",
+        "date_field": "fecha_compra",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_date_field_is_forced_required_and_persisted():
+    type_def = record_schema.validate_type_definition(_purchases_input())
+    assert type_def["dateField"] == "fecha_compra"
+    assert next(f for f in type_def["fields"] if f["key"] == "fecha_compra")["required"] is True
+
+
+def test_date_field_must_exist_and_be_a_date():
+    with pytest.raises(ValueError):
+        record_schema.validate_type_definition(_purchases_input(date_field="nope"))
+    with pytest.raises(ValueError):
+        record_schema.validate_type_definition(_purchases_input(date_field="producto"))
+
+
+def test_period_follows_date_field_not_load_date():
+    type_def = record_schema.validate_type_definition(_purchases_input())
+    _, _, _, occurred_at, period = record_schema.coerce_values(
+        type_def, {"producto": "Kiwi", "monto": 1, "fecha_compra": "2026-10-26"}
+    )
+    assert period == "2026-10"
+    assert occurred_at.startswith("2026-10-26")
+
+
+def test_date_field_wins_over_caller_occurred_at():
+    type_def = record_schema.validate_type_definition(_purchases_input())
+    _, _, _, occurred_at, period = record_schema.coerce_values(
+        type_def, {"producto": "Kiwi", "monto": 1, "fecha_compra": "2026-10-26"}, "2026-11-10T01:00:00Z"
+    )
+    assert period == "2026-10"
+
+
+def test_without_date_field_period_is_load_date():
+    type_def = record_schema.validate_type_definition(_purchases_input(date_field=None))
+    assert type_def["dateField"] is None
+    _, _, _, _, period = record_schema.coerce_values(
+        type_def, {"producto": "Kiwi", "monto": 1, "fecha_compra": "2026-10-26"}, "2026-11-10T01:00:00Z"
+    )
+    assert period == "2026-11"

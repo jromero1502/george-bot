@@ -127,6 +127,15 @@ def validate_type_definition(input_: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"group_field {group_field!r} no corresponde a ningun campo declarado en 'fields'.")
         group_def["required"] = True  # ungrouped records would collapse into a misleading bucket
 
+    date_field = input_.get("date_field") or None
+    if date_field is not None:
+        date_def = fields_by_key.get(date_field)
+        if date_def is None:
+            raise ValueError(f"date_field {date_field!r} no corresponde a ningun campo declarado en 'fields'.")
+        if date_def["type"] != "date":
+            raise ValueError(f"date_field debe ser un campo de tipo 'date' (el campo {date_field!r} es {date_def['type']!r}).")
+        date_def["required"] = True  # a record without it would fall back to the load date and land in the wrong period
+
     client_link = input_.get("client_link") or "none"
     if client_link not in CLIENT_LINK_MODES:
         raise ValueError(f"client_link debe ser uno de: {', '.join(CLIENT_LINK_MODES)} (recibido {client_link!r}).")
@@ -139,8 +148,21 @@ def validate_type_definition(input_: dict[str, Any]) -> dict[str, Any]:
         "fields": fields,
         "measureField": measure_field,
         "groupField": group_field,
+        "dateField": date_field,
         "clientLink": client_link,
     }
+
+
+def date_field_occurred_at(type_def: dict[str, Any], values: dict[str, Any]) -> Optional[str]:
+    """When the type declares a `dateField`, that field IS the record's date:
+    `occurredAt` (and so `period`, `since`/`until`) follow it instead of the
+    moment the record was loaded. A date-only value becomes midday UTC so the
+    calendar day survives any timezone. None if the type has no dateField."""
+    key = type_def.get("dateField")
+    if not key or values.get(key) in (None, ""):
+        return None
+    raw = str(values[key])
+    return f"{raw}T12:00:00Z" if len(raw) == 10 else raw
 
 
 def derive_period(occurred_at: str) -> str:
@@ -242,6 +264,9 @@ def coerce_values(
         else:  # text
             values[key] = str(raw)
 
+    from_field = date_field_occurred_at(type_def, values)
+    if from_field:
+        occurred_at_in = from_field  # the type's own date wins over a caller-supplied/default one
     if occurred_at_in:
         try:
             datetime.fromisoformat(occurred_at_in.replace("Z", "+00:00"))

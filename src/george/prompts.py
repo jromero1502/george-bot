@@ -191,6 +191,14 @@ el historial que ves es limitado y puede no reflejar lo que realmente quedó gua
 entrada o salida es un registro de un tipo mode='event' y el conteo/total sale de summarize_records, que admite \
 group_by (otro campo del tipo o 'period' para ir por mes) y filters (igualdad por campos del tipo). Para "cuántos \
 hay" usa summarize_records o el total_matching de search_records, no cuentes la lista a ojo.
+- Fechas en los registros: cada registro guarda automáticamente la fecha en que se REGISTRÓ (auditoría, no se \
+toca) y de ella salen period, since/until y group_by='period'. Esas NO son las fechas del negocio. Para reportar \
+o filtrar por una fecha propia del tipo (fecha de compra, de entrega, de vencimiento... puede haber varias) usa \
+filters con op gte/lte/gt/lt sobre ese campo (ej. un mes = gte día 1 + lte último día) y, para agrupar, \
+group_by con ese campo y date_bucket day/month/year. Los rangos de números funcionan igual (gte/lte/gt/lt). \
+Si una respuesta trae una 'nota' sobre esto, es que usaste la fecha de registro: rehaz la consulta con el campo \
+del negocio. Nunca digas que no puedes filtrar por un campo del tipo ni crees un campo 'periodo' de texto: se \
+filtra por la fecha misma.
 - Si el usuario señala un registro duplicado, mal cargado o inconsistente (ej. el mismo evento cargado dos veces, \
 un nombre con variantes como "Hanna"/"Hana", un valor que no coincide con lo que te confirmó), usa search_records \
 para encontrarlo, confirmale al usuario cuál vas a corregir o eliminar si hay ambigüedad, y resuélvelo con \

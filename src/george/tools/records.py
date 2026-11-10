@@ -8,7 +8,7 @@ is no per-business-type code here.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Optional
 
 from george import record_schema
 from george.repositories import clients as clients_repo
@@ -45,6 +45,21 @@ def _slim_type(type_def: dict[str, Any]) -> dict[str, Any]:
             for f in type_def.get("fields", [])
         ],
     }
+
+
+def _date_note(type_def: dict[str, Any]) -> Optional[str]:
+    """since/until/period/group_by='period' use the record's system date
+    (occurredAt: when it was logged), NOT the owner's own date fields. Say so
+    when the type has date fields of its own, so a report by fecha_compra is
+    never silently built on the load date."""
+    own_dates = [f["key"] for f in type_def.get("fields", []) if f["type"] == "date"]
+    if not own_dates:
+        return None
+    return (
+        "since/until/period y group_by='period' usan la fecha en que se REGISTRO el registro, no las fechas "
+        f"del negocio ({', '.join(own_dates)}). Para filtrar o agrupar por una de esas fechas usa filters "
+        "(op gte/lte) y group_by con date_bucket."
+    )
 
 
 def _define_record_type(input_: dict[str, Any], ctx: ToolContext) -> str:
@@ -176,7 +191,7 @@ def _search_records(input_: dict[str, Any], ctx: ToolContext) -> str:
     require_role(ctx, _USE_ROLES, "search_records")
     tenant_id = require_tenant(ctx)
     type_key = input_.get("type_key")
-    value_filters: list[tuple[str, Any]] = []
+    value_filters: list[dict[str, Any]] = []
     if input_.get("filters"):
         if not type_key:
             raise ToolError("Para usar 'filters' indica también type_key.")
@@ -184,7 +199,7 @@ def _search_records(input_: dict[str, Any], ctx: ToolContext) -> str:
         if type_def is None:
             raise ToolError(f"No existe un tipo de registro con type_key={type_key!r} en este negocio.")
         try:
-            _, value_filters = record_schema.validate_query(type_def, None, input_["filters"])
+            _, _, value_filters = record_schema.validate_query(type_def, None, input_["filters"])
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
     query = dict(
@@ -213,10 +228,18 @@ def _search_records(input_: dict[str, Any], ctx: ToolContext) -> str:
         }
         for r in shown
     ]
-    return json.dumps(
-        {"records": slim, "total_matching": total, "listed": len(slim), "truncated": total > len(slim)},
-        ensure_ascii=False,
-    )
+    out: dict[str, Any] = {
+        "records": slim,
+        "total_matching": total,
+        "listed": len(slim),
+        "truncated": total > len(slim),
+    }
+    if type_key and (query["period"] or query["since"] or query["until"]):
+        type_def = records_repo.get_record_type(tenant_id, type_key)
+        note = _date_note(type_def) if type_def else None
+        if note:
+            out["nota"] = note
+    return json.dumps(out, ensure_ascii=False)
 
 
 def _summarize_records(input_: dict[str, Any], ctx: ToolContext) -> str:
@@ -227,7 +250,9 @@ def _summarize_records(input_: dict[str, Any], ctx: ToolContext) -> str:
     if type_def is None:
         raise ToolError(f"No existe un tipo de registro con type_key={type_key!r} en este negocio.")
     try:
-        group_by, value_filters = record_schema.validate_query(type_def, input_.get("group_by"), input_.get("filters"))
+        group_by, bucket_len, value_filters = record_schema.validate_query(
+            type_def, input_.get("group_by"), input_.get("filters"), input_.get("date_bucket")
+        )
     except ValueError as exc:
         raise ToolError(str(exc)) from exc
     result = records_repo.summarize_records(
@@ -241,6 +266,7 @@ def _summarize_records(input_: dict[str, Any], ctx: ToolContext) -> str:
         value_filters=value_filters,
         group_by=group_by,
         type_group_field=type_def.get("groupField"),
+        bucket_len=bucket_len,
     )
     out: dict[str, Any] = {
         "typeKey": type_def["typeKey"],
@@ -249,6 +275,9 @@ def _summarize_records(input_: dict[str, Any], ctx: ToolContext) -> str:
         "groupedBy": group_by or type_def.get("groupField") or "total",
         "summary": result["summary"],
     }
+    note = _date_note(type_def)
+    if note and (input_.get("since") or input_.get("until") or input_.get("period") or group_by == "period"):
+        out["nota"] = note
     if result["ungrouped"]:
         out["ungrouped"] = result["ungrouped"]  # records without a value for the group_by field
     if result["truncated"]:
@@ -399,12 +428,30 @@ TOOLS = [
                 "type_key": {"type": "string"},
                 "client_id": {"type": "string"},
                 "group_key": {"type": "string"},
-                "period": {"type": "string", "description": "YYYY-MM"},
+                "period": {"type": "string", "description": "YYYY-MM de la fecha en que se REGISTRO (sistema), no de una fecha del negocio: para esas usa filters"},
                 "since": {"type": "string", "description": "ISO 8601"},
                 "until": {"type": "string", "description": "ISO 8601"},
                 "filters": {
-                    "type": "object",
-                    "description": "Igualdad exacta por campos del tipo, {key_del_campo: valor}. Ej. {\"vendedor\": \"Ana\"}",
+                    "type": "array",
+                    "description": (
+                        "Condiciones sobre campos del tipo, todas deben cumplirse. Cada una: {field, op, value}; "
+                        "op = eq (defecto), ne, gt, gte, lt, lte (gt/gte/lt/lte solo en campos number o date). "
+                        "Un rango son dos condiciones sobre el mismo campo. Las fechas van como YYYY-MM-DD "
+                        "y comparan por dia. Ej. compras entre dos fechas de compra: "
+                        "[{\"field\":\"fecha_compra\",\"op\":\"gte\",\"value\":\"2026-10-01\"},"
+                        "{\"field\":\"fecha_compra\",\"op\":\"lte\",\"value\":\"2026-10-31\"}]. "
+                        "Sirve para CUALQUIER campo del tipo, incluidas varias fechas distintas."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "field": {"type": "string"},
+                            "op": {"type": "string", "enum": ["eq", "ne", "gt", "gte", "lt", "lte"]},
+                            "value": {},
+                        },
+                        "required": ["field", "value"],
+                        "additionalProperties": False,
+                    },
                 },
             },
             "required": [],
@@ -429,13 +476,42 @@ TOOLS = [
                 "type_key": {"type": "string"},
                 "since": {"type": "string", "description": "ISO 8601"},
                 "until": {"type": "string", "description": "ISO 8601"},
-                "group_by": {"type": "string", "description": "'period' o la key de un campo del tipo"},
+                "group_by": {
+                    "type": "string",
+                    "description": (
+                        "key de un campo del tipo (si es de tipo date agrupa por dia/mes/año segun date_bucket) o "
+                        "'period' (mes de la fecha de REGISTRO del sistema, no de las fechas del negocio)"
+                    ),
+                },
+                "date_bucket": {
+                    "type": "string",
+                    "enum": ["day", "month", "year"],
+                    "description": "Solo con group_by de un campo date; defecto month",
+                },
                 "filters": {
-                    "type": "object",
-                    "description": "Igualdad exacta por campos del tipo, {key_del_campo: valor}. Ej. {\"vendedor\": \"Ana\"}",
+                    "type": "array",
+                    "description": (
+                        "Condiciones sobre campos del tipo, todas deben cumplirse. Cada una: {field, op, value}; "
+                        "op = eq (defecto), ne, gt, gte, lt, lte (gt/gte/lt/lte solo en campos number o date). "
+                        "Un rango son dos condiciones sobre el mismo campo. Las fechas van como YYYY-MM-DD "
+                        "y comparan por dia. Ej. compras entre dos fechas de compra: "
+                        "[{\"field\":\"fecha_compra\",\"op\":\"gte\",\"value\":\"2026-10-01\"},"
+                        "{\"field\":\"fecha_compra\",\"op\":\"lte\",\"value\":\"2026-10-31\"}]. "
+                        "Sirve para CUALQUIER campo del tipo, incluidas varias fechas distintas."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "field": {"type": "string"},
+                            "op": {"type": "string", "enum": ["eq", "ne", "gt", "gte", "lt", "lte"]},
+                            "value": {},
+                        },
+                        "required": ["field", "value"],
+                        "additionalProperties": False,
+                    },
                 },
                 "client_id": {"type": "string"},
-                "period": {"type": "string", "description": "YYYY-MM"},
+                "period": {"type": "string", "description": "YYYY-MM de la fecha en que se REGISTRO (sistema), no de una fecha del negocio: para esas usa filters"},
             },
             "required": ["type_key"],
             "additionalProperties": False,

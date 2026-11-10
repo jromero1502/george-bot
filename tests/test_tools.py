@@ -632,20 +632,56 @@ def test_report_tools_allow_gmail_read_only_but_no_writes():
 # ---------------------------------------------------------------------------
 # repositories/records.py query building (dynamic filters / group_by)
 # ---------------------------------------------------------------------------
+def _cond(key, op, value, kind="text", day=False):
+    return {"key": key, "op": op, "value": value, "kind": kind, "day": day}
+
+
 def test_records_repo_value_filters_are_parametrized():
     from george.repositories import records as records_repo
 
-    clauses, params = records_repo._where("ventas", None, None, "2026-11", None, None, [("vendedor", "Ana' OR 1=1")])
+    clauses, params = records_repo._where(
+        "ventas", None, None, "2026-11", None, None, [_cond("vendedor", "=", "Ana' OR 1=1")]
+    )
     assert 'c.values["vendedor"] = @vf0' in clauses
     assert {"name": "@vf0", "value": "Ana' OR 1=1"} in params
     assert not any("OR 1=1" in c for c in clauses)
 
 
-def test_records_repo_rejects_unsafe_property_key():
+def test_records_repo_range_operators_and_day_comparison():
+    from george.repositories import records as records_repo
+
+    clauses, params = records_repo._where(
+        None, None, None, None, None, None,
+        [
+            _cond("monto", ">=", 100.0, "number"),
+            _cond("monto", "<", 500.0, "number"),
+            _cond("fecha_compra", ">=", "2026-10-01", "date", day=True),
+            _cond("fecha_entrega", "<=", "2026-11-05T10:00:00-05:00", "date"),
+        ],
+    )
+    assert 'c.values["monto"] >= @vf0' in clauses
+    assert 'c.values["monto"] < @vf1' in clauses
+    assert 'SUBSTRING(c.values["fecha_compra"], 0, 10) >= @vf2' in clauses
+    assert 'c.values["fecha_entrega"] <= @vf3' in clauses
+    assert len(params) == 4 + 0
+
+
+def test_records_repo_rejects_unsafe_key_op_and_bucket():
     from george.repositories import records as records_repo
 
     with pytest.raises(ValueError):
         records_repo._value_path('x"] OR true --')
+    with pytest.raises(ValueError):
+        records_repo._where(None, None, None, None, None, None, [_cond("monto", "= 1 OR 1 =", 1)])
+    with pytest.raises(ValueError):
+        records_repo._group_expr("fecha", None, 99)
+
+
+def test_records_repo_group_expr():
+    from george.repositories import records as records_repo
+
     assert records_repo._group_expr("period", "sabor") == "c.period"
     assert records_repo._group_expr("sabor", "sabor") == "c.groupKey"
     assert records_repo._group_expr(None, "sabor") == "c.groupKey"
+    assert records_repo._group_expr("fecha_compra", "sabor", 7) == 'SUBSTRING(c.values["fecha_compra"], 0, 7)'
+    assert records_repo._group_expr("vendedor", "sabor") == 'c.values["vendedor"]'

@@ -235,21 +235,79 @@ def test_coerce_values_rejects_invalid_occurred_at():
 
 
 # ---------------------------------------------------------------------------
-# validate_query (dynamic group_by / filters — the injection boundary)
+# validate_query (dynamic group_by / filters / date_bucket — the injection boundary)
 # ---------------------------------------------------------------------------
 def _type_def():
-    return record_schema.validate_type_definition(_stock_type_input())
+    return record_schema.validate_type_definition(
+        _stock_type_input(
+            fields=[
+                {"key": "sabor", "type": "choice", "choices": ["carne", "pollo"], "required": True},
+                {"key": "cantidad", "type": "number", "required": True},
+                {"key": "fecha_compra", "type": "date"},
+                {"key": "fecha_entrega", "type": "date"},
+            ]
+        )
+    )
+
+
+def _f(field, value, op="eq"):
+    return {"field": field, "op": op, "value": value}
 
 
 def test_validate_query_defaults():
-    assert record_schema.validate_query(_type_def(), None, None) == (None, [])
+    assert record_schema.validate_query(_type_def(), None, None) == (None, None, [])
 
 
-def test_validate_query_accepts_field_period_and_typed_filters():
-    group, pairs = record_schema.validate_query(_type_def(), "period", {"sabor": "carne", "cantidad": "5"})
-    assert group == "period"
-    assert pairs == [("sabor", "carne"), ("cantidad", 5.0)]
-    assert record_schema.validate_query(_type_def(), "sabor", None)[0] == "sabor"
+def test_validate_query_legacy_dict_is_equality():
+    _, _, conds = record_schema.validate_query(_type_def(), None, {"sabor": "carne", "cantidad": "5"})
+    assert [(c["key"], c["op"], c["value"]) for c in conds] == [("sabor", "=", "carne"), ("cantidad", "=", 5.0)]
+
+
+def test_validate_query_number_and_date_ranges_on_several_date_fields():
+    _, _, conds = record_schema.validate_query(
+        _type_def(),
+        None,
+        [
+            _f("cantidad", 10, "gte"),
+            _f("cantidad", "20", "lt"),
+            _f("fecha_compra", "2026-10-01", "gte"),
+            _f("fecha_entrega", "2026-11-05T10:00:00-05:00", "lte"),
+        ],
+    )
+    assert [c["op"] for c in conds] == [">=", "<", ">=", "<="]
+    assert conds[1]["value"] == 20.0
+    assert conds[2]["day"] is True  # bare date -> calendar-day comparison
+    assert conds[3]["day"] is False  # has a time -> full comparison
+
+
+@pytest.mark.parametrize("field", ["sabor", "fecha_compra"])
+def test_validate_query_order_ops_rejected_on_text_and_choice(field):
+    if field == "fecha_compra":
+        record_schema.validate_query(_type_def(), None, [_f(field, "2026-10-01", "gt")])  # allowed
+        return
+    with pytest.raises(ValueError):
+        record_schema.validate_query(_type_def(), None, [_f(field, "carne", "gt")])
+
+
+def test_validate_query_rejects_bad_op_value_and_unknown_field():
+    with pytest.raises(ValueError):
+        record_schema.validate_query(_type_def(), None, [_f("cantidad", 1, "like")])
+    with pytest.raises(ValueError):
+        record_schema.validate_query(_type_def(), None, [_f("cantidad", "mucho", "gt")])
+    with pytest.raises(ValueError):
+        record_schema.validate_query(_type_def(), None, [_f("fecha_compra", "ayer", "gte")])
+    with pytest.raises(ValueError):
+        record_schema.validate_query(_type_def(), None, [{"field": "cantidad", "op": "gt"}])
+    with pytest.raises(ValueError):
+        record_schema.validate_query(_type_def(), None, [_f("cantidad", 1)] * 11)
+    with pytest.raises(ValueError):
+        record_schema.validate_query(_type_def(), None, "sabor=carne")
+
+
+@pytest.mark.parametrize("bad", ['sabor"] OR 1=1 --', "nope", "id"])
+def test_validate_query_rejects_undeclared_filter_key(bad):
+    with pytest.raises(ValueError):
+        record_schema.validate_query(_type_def(), None, [_f(bad, "x")])
 
 
 @pytest.mark.parametrize("bad", ['sabor"] OR 1=1 --', "values", "c.id", "SABOR", "nope"])
@@ -258,14 +316,11 @@ def test_validate_query_rejects_undeclared_group_by(bad):
         record_schema.validate_query(_type_def(), bad, None)
 
 
-@pytest.mark.parametrize("bad", ['sabor"] OR 1=1 --', "nope", "id"])
-def test_validate_query_rejects_undeclared_filter_key(bad):
+def test_validate_query_date_bucket():
+    assert record_schema.validate_query(_type_def(), "fecha_compra", None)[:2] == ("fecha_compra", 7)
+    assert record_schema.validate_query(_type_def(), "fecha_entrega", None, "day")[1] == 10
+    assert record_schema.validate_query(_type_def(), "fecha_compra", None, "year")[1] == 4
+    assert record_schema.validate_query(_type_def(), "sabor", None, "day")[1] is None  # not a date field
+    assert record_schema.validate_query(_type_def(), "period", None)[1] is None
     with pytest.raises(ValueError):
-        record_schema.validate_query(_type_def(), None, {bad: "x"})
-
-
-def test_validate_query_rejects_bad_filter_values():
-    with pytest.raises(ValueError):
-        record_schema.validate_query(_type_def(), None, {"cantidad": "mucho"})
-    with pytest.raises(ValueError):
-        record_schema.validate_query(_type_def(), None, "sabor=carne")
+        record_schema.validate_query(_type_def(), "fecha_compra", None, "week")

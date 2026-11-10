@@ -20,6 +20,7 @@ from george.util import new_id, utc_now_iso
 
 _DEFAULT_SUMMARY_LIMIT = 500
 _SAFE_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+_SAFE_OPS = frozenset({"=", "!=", ">", ">=", "<", "<="})
 
 
 def _container():
@@ -133,7 +134,7 @@ def _where(
     period: Optional[str],
     since: Optional[str],
     until: Optional[str],
-    value_filters: Optional[list[tuple[str, Any]]],
+    value_filters: Optional[list[dict[str, Any]]],
 ) -> tuple[list[str], list[dict[str, Any]]]:
     clauses = ["c.docType = 'record'"]
     params: list[dict[str, Any]] = []
@@ -156,9 +157,16 @@ def _where(
     if until:
         clauses.append("c.occurredAt <= @until")
         params.append({"name": "@until", "value": until})
-    for i, (key, value) in enumerate(value_filters or []):
-        clauses.append(f"{_value_path(key)} = @vf{i}")
-        params.append({"name": f"@vf{i}", "value": value})
+    for i, cond in enumerate(value_filters or []):
+        # `op` is interpolated, so it must be one of the validated SQL operators.
+        if cond["op"] not in _SAFE_OPS:
+            raise ValueError(f"Operador invalido: {cond['op']!r}")
+        path = _value_path(cond["key"])
+        if cond.get("day"):
+            # bare date vs a stored date that may carry a time: compare by calendar day
+            path = f"SUBSTRING({path}, 0, 10)"
+        clauses.append(f"{path} {cond['op']} @vf{i}")
+        params.append({"name": f"@vf{i}", "value": cond["value"]})
     return clauses, params
 
 
@@ -171,7 +179,7 @@ def search_records(
     since: Optional[str] = None,
     until: Optional[str] = None,
     limit: int = 50,
-    value_filters: Optional[list[tuple[str, Any]]] = None,
+    value_filters: Optional[list[dict[str, Any]]] = None,
 ) -> list[dict[str, Any]]:
     clauses, params = _where(type_key, client_id, group_key, period, since, until, value_filters)
     query = f"SELECT TOP {int(limit)} * FROM c WHERE {' AND '.join(clauses)} ORDER BY c.occurredAt DESC"
@@ -186,7 +194,7 @@ def count_records(
     period: Optional[str] = None,
     since: Optional[str] = None,
     until: Optional[str] = None,
-    value_filters: Optional[list[tuple[str, Any]]] = None,
+    value_filters: Optional[list[dict[str, Any]]] = None,
 ) -> int:
     clauses, params = _where(type_key, client_id, group_key, period, since, until, value_filters)
     query = f"SELECT VALUE COUNT(1) FROM c WHERE {' AND '.join(clauses)}"
@@ -194,11 +202,15 @@ def count_records(
     return int(rows[0]) if rows else 0
 
 
-def _group_expr(group_by: Optional[str], type_group_field: Optional[str]) -> str:
+def _group_expr(group_by: Optional[str], type_group_field: Optional[str], bucket_len: Optional[int] = None) -> str:
     if group_by is None or group_by == type_group_field:
         return "c.groupKey"  # denormalized, same value as values[groupField]
     if group_by == "period":
         return "c.period"
+    if bucket_len:  # a date field bucketed by day/month/year
+        if bucket_len not in (4, 7, 10):
+            raise ValueError(f"bucket invalido: {bucket_len!r}")
+        return f"SUBSTRING({_value_path(group_by)}, 0, {int(bucket_len)})"
     return _value_path(group_by)
 
 
@@ -214,9 +226,10 @@ def summarize_records(
     until: Optional[str] = None,
     client_id: Optional[str] = None,
     period: Optional[str] = None,
-    value_filters: Optional[list[tuple[str, Any]]] = None,
+    value_filters: Optional[list[dict[str, Any]]] = None,
     group_by: Optional[str] = None,
     type_group_field: Optional[str] = None,
+    bucket_len: Optional[int] = None,
 ) -> dict[str, Any]:
     """Returns {"summary": [...], "truncated": bool, "ungrouped": {...}|None}.
 
@@ -229,7 +242,7 @@ def summarize_records(
     self-join Cosmos SQL can't express, so it reduces in Python over up to
     _DEFAULT_SUMMARY_LIMIT records and says so via `truncated` if there were
     more."""
-    expr = _group_expr(group_by, type_group_field)
+    expr = _group_expr(group_by, type_group_field, bucket_len)
     clauses, params = _where(type_key, client_id, None, period, since, until, value_filters)
     where = " AND ".join(clauses)
 
@@ -252,7 +265,8 @@ def summarize_records(
                 return record.get("groupKey")
             if expr == "c.period":
                 return record.get("period")
-            return (record.get("values") or {}).get(group_by)
+            value = (record.get("values") or {}).get(group_by)
+            return str(value)[:bucket_len] if bucket_len and value is not None else value
 
         latest: dict[Any, dict[str, Any]] = {}
         for record in records:  # already ordered by occurredAt DESC

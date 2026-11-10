@@ -20,6 +20,7 @@ from george.util import new_id, utc_now_iso
 
 _DEFAULT_SUMMARY_LIMIT = 500
 _SAFE_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+_SAFE_OPS = frozenset({"=", "!=", ">", ">=", "<", "<="})
 
 
 def _container():
@@ -71,7 +72,6 @@ def upsert_record_type(
             "fields": type_def["fields"],
             "measureField": type_def["measureField"],
             "groupField": type_def["groupField"],
-            "dateField": type_def.get("dateField"),
             "clientLink": type_def["clientLink"],
         }
     )
@@ -134,7 +134,7 @@ def _where(
     period: Optional[str],
     since: Optional[str],
     until: Optional[str],
-    value_filters: Optional[list[tuple[str, Any]]],
+    value_filters: Optional[list[dict[str, Any]]],
 ) -> tuple[list[str], list[dict[str, Any]]]:
     clauses = ["c.docType = 'record'"]
     params: list[dict[str, Any]] = []
@@ -157,9 +157,16 @@ def _where(
     if until:
         clauses.append("c.occurredAt <= @until")
         params.append({"name": "@until", "value": until})
-    for i, (key, value) in enumerate(value_filters or []):
-        clauses.append(f"{_value_path(key)} = @vf{i}")
-        params.append({"name": f"@vf{i}", "value": value})
+    for i, cond in enumerate(value_filters or []):
+        # `op` is interpolated, so it must be one of the validated SQL operators.
+        if cond["op"] not in _SAFE_OPS:
+            raise ValueError(f"Operador invalido: {cond['op']!r}")
+        path = _value_path(cond["key"])
+        if cond.get("day"):
+            # bare date vs a stored date that may carry a time: compare by calendar day
+            path = f"SUBSTRING({path}, 0, 10)"
+        clauses.append(f"{path} {cond['op']} @vf{i}")
+        params.append({"name": f"@vf{i}", "value": cond["value"]})
     return clauses, params
 
 
@@ -172,7 +179,7 @@ def search_records(
     since: Optional[str] = None,
     until: Optional[str] = None,
     limit: int = 50,
-    value_filters: Optional[list[tuple[str, Any]]] = None,
+    value_filters: Optional[list[dict[str, Any]]] = None,
 ) -> list[dict[str, Any]]:
     clauses, params = _where(type_key, client_id, group_key, period, since, until, value_filters)
     query = f"SELECT TOP {int(limit)} * FROM c WHERE {' AND '.join(clauses)} ORDER BY c.occurredAt DESC"
@@ -187,7 +194,7 @@ def count_records(
     period: Optional[str] = None,
     since: Optional[str] = None,
     until: Optional[str] = None,
-    value_filters: Optional[list[tuple[str, Any]]] = None,
+    value_filters: Optional[list[dict[str, Any]]] = None,
 ) -> int:
     clauses, params = _where(type_key, client_id, group_key, period, since, until, value_filters)
     query = f"SELECT VALUE COUNT(1) FROM c WHERE {' AND '.join(clauses)}"
@@ -195,11 +202,15 @@ def count_records(
     return int(rows[0]) if rows else 0
 
 
-def _group_expr(group_by: Optional[str], type_group_field: Optional[str]) -> str:
+def _group_expr(group_by: Optional[str], type_group_field: Optional[str], bucket_len: Optional[int] = None) -> str:
     if group_by is None or group_by == type_group_field:
         return "c.groupKey"  # denormalized, same value as values[groupField]
     if group_by == "period":
         return "c.period"
+    if bucket_len:  # a date field bucketed by day/month/year
+        if bucket_len not in (4, 7, 10):
+            raise ValueError(f"bucket invalido: {bucket_len!r}")
+        return f"SUBSTRING({_value_path(group_by)}, 0, {int(bucket_len)})"
     return _value_path(group_by)
 
 
@@ -215,9 +226,10 @@ def summarize_records(
     until: Optional[str] = None,
     client_id: Optional[str] = None,
     period: Optional[str] = None,
-    value_filters: Optional[list[tuple[str, Any]]] = None,
+    value_filters: Optional[list[dict[str, Any]]] = None,
     group_by: Optional[str] = None,
     type_group_field: Optional[str] = None,
+    bucket_len: Optional[int] = None,
 ) -> dict[str, Any]:
     """Returns {"summary": [...], "truncated": bool, "ungrouped": {...}|None}.
 
@@ -230,7 +242,7 @@ def summarize_records(
     self-join Cosmos SQL can't express, so it reduces in Python over up to
     _DEFAULT_SUMMARY_LIMIT records and says so via `truncated` if there were
     more."""
-    expr = _group_expr(group_by, type_group_field)
+    expr = _group_expr(group_by, type_group_field, bucket_len)
     clauses, params = _where(type_key, client_id, None, period, since, until, value_filters)
     where = " AND ".join(clauses)
 
@@ -253,7 +265,8 @@ def summarize_records(
                 return record.get("groupKey")
             if expr == "c.period":
                 return record.get("period")
-            return (record.get("values") or {}).get(group_by)
+            value = (record.get("values") or {}).get(group_by)
+            return str(value)[:bucket_len] if bucket_len and value is not None else value
 
         latest: dict[Any, dict[str, Any]] = {}
         for record in records:  # already ordered by occurredAt DESC
@@ -322,37 +335,6 @@ def update_record(
         }
     )
     return _container().replace_item(item=record_id, body=doc)
-
-
-def rederive_dates(tenant_id: str, type_def: dict[str, Any], limit: int = 2000) -> int:
-    """Re-aligns `occurredAt`/`period` of every existing record of a type with
-    its `dateField` (used when define_record_type sets or changes it, so old
-    records stop sitting in the month they were LOADED instead of the month
-    they belong to). Returns how many records changed. Records without a value
-    in the date field are left alone."""
-    from george import record_schema  # local import: record_schema has no Cosmos deps, keep it that way
-
-    if not type_def.get("dateField"):
-        return 0
-    docs = list(
-        _container().query_items(
-            query=f"SELECT TOP {int(limit)} * FROM c WHERE c.docType = 'record' AND c.typeKey = @t",
-            parameters=[{"name": "@t", "value": type_def["typeKey"]}],
-            partition_key=tenant_id,
-        )
-    )
-    changed = 0
-    for doc in docs:
-        occurred_at = record_schema.date_field_occurred_at(type_def, doc.get("values") or {})
-        if not occurred_at:
-            continue
-        period = record_schema.derive_period(occurred_at)
-        if doc.get("occurredAt") == occurred_at and doc.get("period") == period:
-            continue
-        doc.update({"occurredAt": occurred_at, "period": period, "updatedAt": utc_now_iso()})
-        _container().replace_item(item=doc["id"], body=doc)
-        changed += 1
-    return changed
 
 
 def delete_record(tenant_id: str, record_id: str) -> bool:

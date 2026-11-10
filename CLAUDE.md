@@ -198,18 +198,23 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
   con un registro contador +1/-1, que se desincroniza; el patrón correcto es un tipo `event` y
   contar con `summarize_records` (el prompt lo dice). Las queries de agregación no se pudieron
   probar contra un emulador de Cosmos: la primera prueba real es en producción.
-  **`dateField` (2026-11-10) — falso positivo real en reportes.** `period`/`since`/`until` salen de
-  `occurredAt`, que por defecto es la fecha de CARGA. En `compras_de_mercado` el owner declaró su
-  propia `fecha_compra` y un campo de texto `periodo`; 12 compras de octubre cargadas el 10/11
-  quedaron con `period=2026-11`, inflaron noviembre ($335.686 + octubre) y `period="2026-10"`
-  devolvía 0. George además afirmaba "no puedo filtrar por periodo" porque no entendía por qué
-  `periodo` (campo) y `period` (columna del sistema) no coincidían. Arreglo: el tipo puede declarar
-  `date_field` (campo `date`, forzado `required`); `coerce_values` deriva `occurredAt`/`period` de
-  él (gana sobre cualquier `occurred_at` del llamador; fecha sola -> mediodía UTC) y
-  `define_record_type` realinea los registros existentes (`rederive_dates`). Sin `date_field`,
-  search/summarize agregan una `nota` cuando se usa since/until/period sobre un tipo con campos
-  `date` propios, para que no parezca un reporte válido por esa fecha. Un tipo ya existente solo se
-  corrige cuando el owner vuelve a llamar `define_record_type` con `date_field`. El prompt (`prompts.py`) inyecta
+  **Operadores, rangos y varias fechas (2026-11-10).** `filters` es una lista `[{field, op, value}]`
+  (op `eq|ne|gt|gte|lt|lte`; el dict `{campo: valor}` anterior sigue valiendo como igualdad); `gt/gte/lt/lte`
+  solo en campos `number`/`date`; un rango son dos condiciones sobre el mismo campo; máx. 10.
+  Una fecha sola (`YYYY-MM-DD`) compara por día (`SUBSTRING(campo,0,10)`), para que `lte 2026-10-31`
+  incluya registros guardados con hora. `group_by` sobre un campo `date` agrupa por `date_bucket`
+  (`day|month|year`, defecto month) con `SUBSTRING(campo,0,N)`. Así un tipo puede tener VARIAS fechas
+  (compra, entrega, vencimiento) y reportar por cualquiera. El operador y el bucket también se
+  interpolan: `FILTER_OPS`/`DATE_BUCKETS` en `record_schema` son la lista cerrada y el repo re-chequea
+  (`_SAFE_OPS`, buckets 4/7/10). **`occurredAt`/`period`/`createdAt` NO se derivan de campos del
+  dueño, a propósito:** son la fecha de registro del sistema (auditoría; `createdAt` además nadie lo
+  puede fijar, `occurredAt` sí vía `log_record.occurred_at`). Falso positivo real (2026-11-10): en
+  `compras_de_mercado`, 12 compras de octubre cargadas el 10/11 quedaron con `period=2026-11`,
+  inflaron noviembre y `period="2026-10"` devolvía 0; George decía "no puedo filtrar por periodo"
+  porque nadie le había dicho que `period` != el campo `periodo` del dueño. Arreglo: el prompt
+  separa "fecha de registro" de "fechas del negocio" y search/summarize devuelven una `nota` si se
+  usa since/until/period sobre un tipo con campos `date` propios. No hay migración de datos: los
+  campos del dueño ya estaban bien, solo faltaba poder consultarlos. El prompt (`prompts.py`) inyecta
   los tipos activos del tenant en `ToolContext.record_types` (cargados una vez por mensaje en
   `function_app.process_update`, igual que `ctx.tenant`) para que George sepa qué existe sin
   gastar un turno en `list_record_types`, y tiene una regla explícita de detección proactiva:

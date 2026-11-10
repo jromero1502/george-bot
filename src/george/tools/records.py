@@ -40,12 +40,26 @@ def _slim_type(type_def: dict[str, Any]) -> dict[str, Any]:
         "clientLink": type_def.get("clientLink"),
         "measureField": type_def.get("measureField"),
         "groupField": type_def.get("groupField"),
-        "dateField": type_def.get("dateField"),
         "fields": [
             {"key": f["key"], "label": f["label"], "type": f["type"], "required": f["required"], "choices": f.get("choices")}
             for f in type_def.get("fields", [])
         ],
     }
+
+
+def _date_note(type_def: dict[str, Any]) -> Optional[str]:
+    """since/until/period/group_by='period' use the record's system date
+    (occurredAt: when it was logged), NOT the owner's own date fields. Say so
+    when the type has date fields of its own, so a report by fecha_compra is
+    never silently built on the load date."""
+    own_dates = [f["key"] for f in type_def.get("fields", []) if f["type"] == "date"]
+    if not own_dates:
+        return None
+    return (
+        "since/until/period y group_by='period' usan la fecha en que se REGISTRO el registro, no las fechas "
+        f"del negocio ({', '.join(own_dates)}). Para filtrar o agrupar por una de esas fechas usa filters "
+        "(op gte/lte) y group_by con date_bucket."
+    )
 
 
 def _define_record_type(input_: dict[str, Any], ctx: ToolContext) -> str:
@@ -56,29 +70,7 @@ def _define_record_type(input_: dict[str, Any], ctx: ToolContext) -> str:
     except ValueError as exc:
         raise ToolError(str(exc)) from exc
     result = records_repo.upsert_record_type(tenant_id, type_def, ctx.chat_id, status=input_.get("status"))
-    out = _slim_type(result)
-    if result.get("dateField"):
-        # Existing records were stamped with their load date; move them to the month they belong to.
-        out["recordsRealigned"] = records_repo.rederive_dates(tenant_id, result)
-    return json.dumps(out, ensure_ascii=False)
-
-
-def _date_note(type_def: dict[str, Any]) -> Optional[str]:
-    """since/until/period/group_by='period' follow the record's date. Without a
-    dateField that is the LOAD date, which silently disagrees with any date
-    field the owner declared (e.g. fecha_compra) — say so instead of letting a
-    report look right while counting purchases in the wrong month."""
-    if type_def.get("dateField"):
-        return None
-    own_dates = [f["key"] for f in type_def.get("fields", []) if f["type"] == "date"]
-    if not own_dates:
-        return None
-    return (
-        "since/until/period y group_by='period' usan la fecha de CARGA del registro, no "
-        f"{', '.join(own_dates)}. Si el reporte debe ir por esa fecha, el owner puede fijarla con "
-        "define_record_type(date_field=...) (realinea los registros existentes). Mientras tanto, "
-        "filtra con filters sobre el campo del tipo."
-    )
+    return json.dumps(_slim_type(result), ensure_ascii=False)
 
 
 def _list_record_types(input_: dict[str, Any], ctx: ToolContext) -> str:
@@ -199,7 +191,7 @@ def _search_records(input_: dict[str, Any], ctx: ToolContext) -> str:
     require_role(ctx, _USE_ROLES, "search_records")
     tenant_id = require_tenant(ctx)
     type_key = input_.get("type_key")
-    value_filters: list[tuple[str, Any]] = []
+    value_filters: list[dict[str, Any]] = []
     if input_.get("filters"):
         if not type_key:
             raise ToolError("Para usar 'filters' indica también type_key.")
@@ -207,7 +199,7 @@ def _search_records(input_: dict[str, Any], ctx: ToolContext) -> str:
         if type_def is None:
             raise ToolError(f"No existe un tipo de registro con type_key={type_key!r} en este negocio.")
         try:
-            _, value_filters = record_schema.validate_query(type_def, None, input_["filters"])
+            _, _, value_filters = record_schema.validate_query(type_def, None, input_["filters"])
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
     query = dict(
@@ -258,7 +250,9 @@ def _summarize_records(input_: dict[str, Any], ctx: ToolContext) -> str:
     if type_def is None:
         raise ToolError(f"No existe un tipo de registro con type_key={type_key!r} en este negocio.")
     try:
-        group_by, value_filters = record_schema.validate_query(type_def, input_.get("group_by"), input_.get("filters"))
+        group_by, bucket_len, value_filters = record_schema.validate_query(
+            type_def, input_.get("group_by"), input_.get("filters"), input_.get("date_bucket")
+        )
     except ValueError as exc:
         raise ToolError(str(exc)) from exc
     result = records_repo.summarize_records(
@@ -272,6 +266,7 @@ def _summarize_records(input_: dict[str, Any], ctx: ToolContext) -> str:
         value_filters=value_filters,
         group_by=group_by,
         type_group_field=type_def.get("groupField"),
+        bucket_len=bucket_len,
     )
     out: dict[str, Any] = {
         "typeKey": type_def["typeKey"],
@@ -335,15 +330,6 @@ TOOLS = [
                 },
                 "measure_field": {"type": "string", "description": "key del campo numerico que se suma/lee en los reportes"},
                 "group_field": {"type": "string", "description": "key del campo por el que se agrupan los reportes (opcional)"},
-                "date_field": {
-                    "type": "string",
-                    "description": (
-                        "key de un campo de tipo 'date' que ES la fecha del registro (ej. 'fecha_compra'): con el, "
-                        "since/until/period y los reportes por mes siguen esa fecha en vez de la de carga, y los "
-                        "registros existentes se realinean. Usalo siempre que el tipo tenga su propia fecha; NO "
-                        "crees ademas un campo 'periodo' de texto."
-                    ),
-                },
                 "client_link": {
                     "type": "string",
                     "enum": ["none", "optional", "required"],
@@ -442,12 +428,30 @@ TOOLS = [
                 "type_key": {"type": "string"},
                 "client_id": {"type": "string"},
                 "group_key": {"type": "string"},
-                "period": {"type": "string", "description": "YYYY-MM de la FECHA DEL REGISTRO (el date_field del tipo; si no tiene, la fecha de carga). No es un campo propio llamado periodo: para ese usa filters"},
+                "period": {"type": "string", "description": "YYYY-MM de la fecha en que se REGISTRO (sistema), no de una fecha del negocio: para esas usa filters"},
                 "since": {"type": "string", "description": "ISO 8601"},
                 "until": {"type": "string", "description": "ISO 8601"},
                 "filters": {
-                    "type": "object",
-                    "description": "Igualdad exacta por campos del tipo, {key_del_campo: valor}. Ej. {\"vendedor\": \"Ana\"}",
+                    "type": "array",
+                    "description": (
+                        "Condiciones sobre campos del tipo, todas deben cumplirse. Cada una: {field, op, value}; "
+                        "op = eq (defecto), ne, gt, gte, lt, lte (gt/gte/lt/lte solo en campos number o date). "
+                        "Un rango son dos condiciones sobre el mismo campo. Las fechas van como YYYY-MM-DD "
+                        "y comparan por dia. Ej. compras entre dos fechas de compra: "
+                        "[{\"field\":\"fecha_compra\",\"op\":\"gte\",\"value\":\"2026-10-01\"},"
+                        "{\"field\":\"fecha_compra\",\"op\":\"lte\",\"value\":\"2026-10-31\"}]. "
+                        "Sirve para CUALQUIER campo del tipo, incluidas varias fechas distintas."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "field": {"type": "string"},
+                            "op": {"type": "string", "enum": ["eq", "ne", "gt", "gte", "lt", "lte"]},
+                            "value": {},
+                        },
+                        "required": ["field", "value"],
+                        "additionalProperties": False,
+                    },
                 },
             },
             "required": [],
@@ -472,13 +476,42 @@ TOOLS = [
                 "type_key": {"type": "string"},
                 "since": {"type": "string", "description": "ISO 8601"},
                 "until": {"type": "string", "description": "ISO 8601"},
-                "group_by": {"type": "string", "description": "'period' o la key de un campo del tipo"},
+                "group_by": {
+                    "type": "string",
+                    "description": (
+                        "key de un campo del tipo (si es de tipo date agrupa por dia/mes/año segun date_bucket) o "
+                        "'period' (mes de la fecha de REGISTRO del sistema, no de las fechas del negocio)"
+                    ),
+                },
+                "date_bucket": {
+                    "type": "string",
+                    "enum": ["day", "month", "year"],
+                    "description": "Solo con group_by de un campo date; defecto month",
+                },
                 "filters": {
-                    "type": "object",
-                    "description": "Igualdad exacta por campos del tipo, {key_del_campo: valor}. Ej. {\"vendedor\": \"Ana\"}",
+                    "type": "array",
+                    "description": (
+                        "Condiciones sobre campos del tipo, todas deben cumplirse. Cada una: {field, op, value}; "
+                        "op = eq (defecto), ne, gt, gte, lt, lte (gt/gte/lt/lte solo en campos number o date). "
+                        "Un rango son dos condiciones sobre el mismo campo. Las fechas van como YYYY-MM-DD "
+                        "y comparan por dia. Ej. compras entre dos fechas de compra: "
+                        "[{\"field\":\"fecha_compra\",\"op\":\"gte\",\"value\":\"2026-10-01\"},"
+                        "{\"field\":\"fecha_compra\",\"op\":\"lte\",\"value\":\"2026-10-31\"}]. "
+                        "Sirve para CUALQUIER campo del tipo, incluidas varias fechas distintas."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "field": {"type": "string"},
+                            "op": {"type": "string", "enum": ["eq", "ne", "gt", "gte", "lt", "lte"]},
+                            "value": {},
+                        },
+                        "required": ["field", "value"],
+                        "additionalProperties": False,
+                    },
                 },
                 "client_id": {"type": "string"},
-                "period": {"type": "string", "description": "YYYY-MM de la FECHA DEL REGISTRO (el date_field del tipo; si no tiene, la fecha de carga). No es un campo propio llamado periodo: para ese usa filters"},
+                "period": {"type": "string", "description": "YYYY-MM de la fecha en que se REGISTRO (sistema), no de una fecha del negocio: para esas usa filters"},
             },
             "required": ["type_key"],
             "additionalProperties": False,

@@ -127,15 +127,6 @@ def validate_type_definition(input_: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"group_field {group_field!r} no corresponde a ningun campo declarado en 'fields'.")
         group_def["required"] = True  # ungrouped records would collapse into a misleading bucket
 
-    date_field = input_.get("date_field") or None
-    if date_field is not None:
-        date_def = fields_by_key.get(date_field)
-        if date_def is None:
-            raise ValueError(f"date_field {date_field!r} no corresponde a ningun campo declarado en 'fields'.")
-        if date_def["type"] != "date":
-            raise ValueError(f"date_field debe ser un campo de tipo 'date' (el campo {date_field!r} es {date_def['type']!r}).")
-        date_def["required"] = True  # a record without it would fall back to the load date and land in the wrong period
-
     client_link = input_.get("client_link") or "none"
     if client_link not in CLIENT_LINK_MODES:
         raise ValueError(f"client_link debe ser uno de: {', '.join(CLIENT_LINK_MODES)} (recibido {client_link!r}).")
@@ -148,21 +139,8 @@ def validate_type_definition(input_: dict[str, Any]) -> dict[str, Any]:
         "fields": fields,
         "measureField": measure_field,
         "groupField": group_field,
-        "dateField": date_field,
         "clientLink": client_link,
     }
-
-
-def date_field_occurred_at(type_def: dict[str, Any], values: dict[str, Any]) -> Optional[str]:
-    """When the type declares a `dateField`, that field IS the record's date:
-    `occurredAt` (and so `period`, `since`/`until`) follow it instead of the
-    moment the record was loaded. A date-only value becomes midday UTC so the
-    calendar day survives any timezone. None if the type has no dateField."""
-    key = type_def.get("dateField")
-    if not key or values.get(key) in (None, ""):
-        return None
-    raw = str(values[key])
-    return f"{raw}T12:00:00Z" if len(raw) == 10 else raw
 
 
 def derive_period(occurred_at: str) -> str:
@@ -172,49 +150,110 @@ def derive_period(occurred_at: str) -> str:
 
 
 PERIOD_GROUP = "period"
+# Operator names the model sees -> Cosmos SQL. The repo re-checks against this
+# map's values before interpolating, so nothing else can reach the query text.
+FILTER_OPS = {"eq": "=", "ne": "!=", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}
+_ORDERED_KINDS = ("number", "date")  # types that admit gt/gte/lt/lte
+DATE_BUCKETS = {"day": 10, "month": 7, "year": 4}  # SUBSTRING length of an ISO date
+MAX_FILTERS = 10
+
+
+def _coerce_filter_value(key: str, ftype: str, raw: Any) -> Any:
+    if ftype == "number":
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            raise ValueError(f"El filtro {key!r} debe ser numerico (recibido {raw!r}).") from None
+    if ftype == "boolean":
+        if not isinstance(raw, bool):
+            raise ValueError(f"El filtro {key!r} debe ser verdadero/falso (recibido {raw!r}).")
+        return raw
+    if ftype == "date":
+        try:
+            datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError(f"El filtro {key!r} debe ser una fecha ISO-8601, ej. 2026-10-31 (recibido {raw!r}).") from None
+        return str(raw)
+    return str(raw)
 
 
 def validate_query(
-    type_def: dict[str, Any], group_by: Optional[str], filters: Optional[dict[str, Any]]
-) -> tuple[Optional[str], list[tuple[str, Any]]]:
-    """Validates a dynamic group_by/filters pair against the type's declared
-    fields. This is the injection boundary: repositories/records.py interpolates
-    field keys into the Cosmos query text (Cosmos can't parametrize a property
-    path), so only keys that exist in `type_def['fields']` (which already match
-    _KEY_RE) may get through. Filter values are coerced to the field's type and
-    always travel as query parameters. Returns (group_by, [(key, value), ...]);
-    group_by is None (use the type's own groupField), 'period', or a field key.
-    Raises ValueError."""
+    type_def: dict[str, Any],
+    group_by: Optional[str],
+    filters: Any,
+    date_bucket: Optional[str] = None,
+) -> tuple[Optional[str], Optional[int], list[dict[str, Any]]]:
+    """Validates a dynamic group_by / filters / date_bucket against the type's
+    declared fields. This is the injection boundary: repositories/records.py
+    interpolates field keys and operators into the Cosmos query text (Cosmos
+    can't parametrize a property path or an operator), so only keys that exist
+    in `type_def['fields']` (which already match _KEY_RE) and operators from
+    FILTER_OPS may get through. Values are coerced to the field's type and
+    always travel as query parameters.
+
+    `filters` is a list of {"field", "op" (default "eq"), "value"}; the older
+    {field: value} dict (equality only) is still accepted. Ranges are several
+    conditions on one field (gte + lte). gt/gte/lt/lte only on number/date
+    fields. A date condition whose value is a bare date (YYYY-MM-DD) compares
+    by calendar day, so lte 2026-10-31 includes records stored with a time.
+
+    Returns (group_by, bucket_len, conditions). group_by is None (the type's
+    groupField), 'period' (system date), or a field key; bucket_len is the
+    SUBSTRING length when group_by is a date field (day/month/year, default
+    month), else None. Each condition: {key, op (SQL), value, kind, day}."""
     fields_by_key = {f["key"]: f for f in type_def["fields"]}
     valid = ", ".join(fields_by_key)
 
+    bucket_len: Optional[int] = None
     if group_by in (None, ""):
         group = None
-    elif group_by == PERIOD_GROUP or group_by in fields_by_key:
+    elif group_by == PERIOD_GROUP:
         group = group_by
+    elif group_by in fields_by_key:
+        group = group_by
+        if fields_by_key[group_by]["type"] == "date":
+            bucket = date_bucket or "month"
+            if bucket not in DATE_BUCKETS:
+                raise ValueError(f"date_bucket debe ser uno de: {', '.join(DATE_BUCKETS)} (recibido {bucket!r}).")
+            bucket_len = DATE_BUCKETS[bucket]
     else:
         raise ValueError(f"group_by invalido: {group_by!r}. Usa 'period' o uno de: {valid}.")
 
-    if filters is not None and not isinstance(filters, dict):
-        raise ValueError("'filters' debe ser un objeto {campo: valor}.")
-    pairs: list[tuple[str, Any]] = []
-    for key, raw in (filters or {}).items():
+    if filters in (None, "", [], {}):
+        items: list[dict[str, Any]] = []
+    elif isinstance(filters, dict):
+        items = [{"field": k, "op": "eq", "value": v} for k, v in filters.items()]
+    elif isinstance(filters, list) and all(isinstance(i, dict) for i in filters):
+        items = filters
+    else:
+        raise ValueError("'filters' debe ser una lista de {field, op, value}.")
+    if len(items) > MAX_FILTERS:
+        raise ValueError(f"Maximo {MAX_FILTERS} filtros por consulta.")
+
+    conditions: list[dict[str, Any]] = []
+    for item in items:
+        key = item.get("field")
         field = fields_by_key.get(key)
         if field is None:
             raise ValueError(f"No se puede filtrar por {key!r}: no es un campo del tipo. Campos validos: {valid}.")
-        if field["type"] == "number":
-            try:
-                value: Any = float(raw)
-            except (TypeError, ValueError):
-                raise ValueError(f"El filtro {key!r} debe ser numerico (recibido {raw!r}).") from None
-        elif field["type"] == "boolean":
-            if not isinstance(raw, bool):
-                raise ValueError(f"El filtro {key!r} debe ser verdadero/falso (recibido {raw!r}).")
-            value = raw
-        else:
-            value = str(raw)
-        pairs.append((key, value))
-    return group, pairs
+        op = item.get("op") or "eq"
+        if op not in FILTER_OPS:
+            raise ValueError(f"op invalido: {op!r}. Usa uno de: {', '.join(FILTER_OPS)}.")
+        if op in ("gt", "gte", "lt", "lte") and field["type"] not in _ORDERED_KINDS:
+            raise ValueError(f"El operador {op!r} solo aplica a campos number o date (el campo {key!r} es {field['type']!r}).")
+        if "value" not in item:
+            raise ValueError(f"Falta 'value' en el filtro de {key!r}.")
+        value = _coerce_filter_value(key, field["type"], item["value"])
+        conditions.append(
+            {
+                "key": key,
+                "op": FILTER_OPS[op],
+                "value": value,
+                "kind": field["type"],
+                "day": field["type"] == "date" and len(str(value)) == 10,
+            }
+        )
+    return group, bucket_len, conditions
 
 
 def coerce_values(
@@ -264,9 +303,6 @@ def coerce_values(
         else:  # text
             values[key] = str(raw)
 
-    from_field = date_field_occurred_at(type_def, values)
-    if from_field:
-        occurred_at_in = from_field  # the type's own date wins over a caller-supplied/default one
     if occurred_at_in:
         try:
             datetime.fromisoformat(occurred_at_in.replace("Z", "+00:00"))

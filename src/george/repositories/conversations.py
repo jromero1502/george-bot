@@ -3,7 +3,7 @@ Partition key: /chatId.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 from george.repositories.cosmos import get_container
 from george.util import new_id, utc_now_iso
@@ -76,6 +76,27 @@ def search_by_date(tenant_id: str, since: str, until: str, limit: int = 300) -> 
             enable_cross_partition_query=True,
         )
     )
+
+
+def find_inbound_text_by_message_id(chat_id: str, message_id: int) -> Optional[str]:
+    """Transcript/OCR/text of a message we already processed, by its Telegram
+    message_id (stored in input.messageId since 2026-11-14; older turns have none).
+    Used when someone replies to a voice note or photo: Telegram's payload for
+    the replied-to message has no text for those. Partition-scoped, so cheap."""
+    rows = list(
+        _container().query_items(
+            query=(
+                "SELECT TOP 1 c.input FROM c WHERE c.chatId = @chatId AND c.direction = 'inbound' "
+                "AND c.input.messageId = @mid"
+            ),
+            parameters=[{"name": "@chatId", "value": chat_id}, {"name": "@mid", "value": message_id}],
+            partition_key=chat_id,
+        )
+    )
+    if not rows:
+        return None
+    inp = rows[0].get("input") or {}
+    return inp.get("transcript") or inp.get("text")
 
 
 def already_processed(chat_id: str, update_id: int) -> bool:

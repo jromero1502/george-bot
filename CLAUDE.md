@@ -434,6 +434,16 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
   frase sale de las tools que de verdad van a correr (`TOOL_STATUS`, vía `on_tools` en `run_agent`), no de lo que
   diga el modelo, así que no cuesta ninguna llamada extra y no puede prometer algo que no hace. Todo best-effort:
   un fallo de Telegram nunca rompe el turno. Tool nueva de lectura = agregar su frase en `TOOL_STATUS`.
+- **Reportes grandes = archivo, no lista (`export_records`, `export_files.py`; 2026-11-14).** Caso real (chat de mercado):
+  `search_records` lista 25 filas, George resumía desde esa lista parcial y llegó a decir "no hay jabón"/"no hay aguacate" con
+  25 de 45 registros a la vista (y a corregirse después). `export_records` (owner/admin, inmediata en `plan.py`) lee TODAS las filas
+  de Cosmos (`records.read_all_records`, sin TOP, tope de seguridad 20.000 con `warning`), arma un xlsx (hojas `Detalle` + `Resumen`;
+  `summary_by` = hasta 3 campos del tipo, los de fecha se agrupan por mes) o csv (UTF-8 con BOM) **dentro del handler** y lo manda con
+  `telegram.send_document` a `ctx.chat_id`: los bytes no pasan por el modelo, que solo recibe filas y total (mismo patrón que
+  `drive_send_file`, y no necesita credenciales de Google). Las celdas vienen de OCR/dictado de terceros, así que todo texto que
+  empiece con `= + - @` se neutraliza (`export_files.safe_text`) contra inyección de fórmulas. Las fechas de campos `date` van como
+  fechas reales de Excel. Los reportes programados (`kind='report'`) NO lo tienen todavía (`_REPORT_TOOL_NAMES`). Pendiente: comparar
+  precios exige un listado de productos base (el `producto` es texto libre) y un precio unitario (monto ÷ cantidad).
 - **Lock por tenant (`plans_repo.tenant_lock`).** `process_update` y `action_worker` toman el mismo lock (clave =
   `tenantId`, o `chat:<id>` sin tenant) para procesar de a un mensaje por negocio; `host.json` ya serializa cada cola,
   pero no una contra otra. Es un lease en Cosmos (`lock::<clave>` en `platformConfig`, crear = tomar, ETag para

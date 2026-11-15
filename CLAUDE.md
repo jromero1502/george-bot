@@ -444,6 +444,16 @@ tests/            pytest — scheduling y gating de tools/tenant, sin dependenci
   empiece con `= + - @` se neutraliza (`export_files.safe_text`) contra inyección de fórmulas. Las fechas de campos `date` van como
   fechas reales de Excel. Los reportes programados (`kind='report'`) NO lo tienen todavía (`_REPORT_TOOL_NAMES`). Pendiente: comparar
   precios exige un listado de productos base (el `producto` es texto libre) y un precio unitario (monto ÷ cantidad).
+- **Contexto de mensajes citados/reenviados (`message_context.py`; 2026-11-14).** Antes `reply_to_message` se ignoraba: un "sí" o
+  "ese no" respondiendo a un mensaje concreto le llegaba a George sin referente (y en un grupo, sin saber de quién). Ahora
+  `function_app._reference_context` antepone al texto del modelo una línea `[Contexto: Responde a un mensaje de X del <fecha en la zona
+  del negocio> (texto|nota de voz|foto): «...»]` (también el fragmento de `quote`, y "Mensaje reenviado, originalmente de X"). Un voice/foto
+  citado no trae texto en el payload de Telegram: por eso `input.messageId` se guarda en `conversations` y
+  `conversations_repo.find_inbound_text_by_message_id` recupera su transcripción/OCR (turnos anteriores a esta fecha no lo tienen: el
+  contexto dice "sin texto disponible" y el prompt le prohíbe inventarlo). El contexto se guarda aparte en `input.context` (`input.text`
+  sigue siendo el texto crudo) y `_history_to_messages` lo reaplica, para que el historial conserve el sentido. Es texto de terceros: se
+  aplana a una línea, se recorta a 1.200 caracteres y el prompt aclara que es contexto, no instrucciones. La búsqueda del mensaje citado
+  es best-effort: si Cosmos falla el turno sigue. No cubre `external_reply` (respuestas a mensajes de otros chats).
 - **Lock por tenant (`plans_repo.tenant_lock`).** `process_update` y `action_worker` toman el mismo lock (clave =
   `tenantId`, o `chat:<id>` sin tenant) para procesar de a un mensaje por negocio; `host.json` ya serializa cada cola,
   pero no una contra otra. Es un lease en Cosmos (`lock::<clave>` en `platformConfig`, crear = tomar, ETag para

@@ -13,7 +13,7 @@ from typing import Any, List, Optional
 
 import azure.functions as func
 
-from george import context, plan, progress, telegram
+from george import context, message_context, plan, progress, telegram
 from george.agent import AgentResult, generate_reminder_message, generate_report_message, run_agent
 from george.config import estimate_cost_usd, settings
 from george.document_intelligence import extract_text as extract_image_text
@@ -144,6 +144,9 @@ def _history_to_messages(history_docs: list[dict[str, Any]], group: bool = False
         user_text = (doc.get("input") or {}).get("transcript") or (doc.get("input") or {}).get("text")
         assistant_text = (doc.get("output") or {}).get("text")
         if user_text:
+            # A reply/forward keeps its context in later turns too: a bare "sí" is
+            # meaningless in the history without the message it answered.
+            user_text = message_context.with_context(user_text, (doc.get("input") or {}).get("context"))
             messages.append({"role": "user", "content": _as_speaker(doc.get("userName"), user_text) if group else user_text})
         if assistant_text:
             # What the tools REALLY did in this turn — see tool_log.py for why the
@@ -177,6 +180,21 @@ def process_update(msg: func.QueueMessage, actionMsg: func.Out[str]) -> None:
     # LockBusy sube y el mensaje vuelve a la cola por el reintento normal.
     with plans_repo.tenant_lock(_lock_key(ctx.tenant_id, chat_id)):
         _process_update_locked(msg, actionMsg, payload, chat_id, message, user_name, ctx)
+
+
+def _reference_context(chat_id: str, message: dict[str, Any], ctx: ToolContext) -> Optional[str]:
+    """What this message replies to / forwards (george/message_context.py). The
+    lookup of a replied-to voice note or photo is best-effort: a Cosmos hiccup
+    must never stop the turn, the model just gets 'sin texto disponible'."""
+    replied = message.get("reply_to_message")
+    looked_up: Optional[str] = None
+    if isinstance(replied, dict) and message_context.needs_lookup(replied) and replied.get("message_id") is not None:
+        try:
+            looked_up = conversations_repo.find_inbound_text_by_message_id(chat_id, replied["message_id"])
+        except Exception:
+            logger.exception("process_update: could not look up replied-to message %s in chat %s", replied.get("message_id"), chat_id)
+    tz_name = (ctx.tenant or {}).get("timezone") or settings.default_timezone
+    return message_context.reference_context(message, tz_name, looked_up)
 
 
 def _lock_key(tenant_id: Optional[str], chat_id: str) -> str:
@@ -300,15 +318,23 @@ def _process_update_body(
         telegram.send_message(chat_id, "No logré entender el mensaje, ¿puedes intentarlo de nuevo?")
         return
 
+    # Telegram message id: lets a later reply to THIS voice/photo find its transcript/OCR.
+    input_record["messageId"] = message.get("message_id")
+    reference = _reference_context(chat_id, message, ctx)
+    if reference:
+        input_record["context"] = reference
+
     history_docs = conversations_repo.get_recent(chat_id, settings.history_turns)
     in_group = telegram.is_group_chat(chat_id)
     history_messages = _history_to_messages(history_docs, group=in_group)
 
-    # input_record above keeps the raw text; only what the model sees is tagged.
+    # input_record above keeps the raw text; only what the model sees is tagged
+    # (speaker in groups) and prefixed (what this message replies to / forwards).
+    model_text = message_context.with_context(user_text, reference)
     result = run_agent(
         ctx,
         history_messages,
-        _as_speaker(user_name, user_text) if in_group else user_text,
+        _as_speaker(user_name, model_text) if in_group else model_text,
         on_tools=status.on_tools,
     )
 

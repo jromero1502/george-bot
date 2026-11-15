@@ -186,6 +186,29 @@ def search_records(
     return list(_container().query_items(query=query, parameters=params, partition_key=tenant_id))
 
 
+def read_all_records(
+    tenant_id: str,
+    type_key: str,
+    max_rows: int,
+    client_id: Optional[str] = None,
+    period: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    value_filters: Optional[list[dict[str, Any]]] = None,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Every matching record (Cosmos pages them; no TOP), for file exports.
+    Reads at most max_rows + 1 so the caller can tell the safety cap was hit:
+    returns (rows[:max_rows], truncated)."""
+    clauses, params = _where(type_key, client_id, None, period, since, until, value_filters)
+    query = f"SELECT * FROM c WHERE {' AND '.join(clauses)} ORDER BY c.occurredAt DESC"
+    rows: list[dict[str, Any]] = []
+    for item in _container().query_items(query=query, parameters=params, partition_key=tenant_id):
+        rows.append(item)
+        if len(rows) > max_rows:
+            break
+    return rows[:max_rows], len(rows) > max_rows
+
+
 def count_records(
     tenant_id: str,
     type_key: Optional[str] = None,

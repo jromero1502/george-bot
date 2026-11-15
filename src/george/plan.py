@@ -38,14 +38,14 @@ WRITE_TOOLS = frozenset(
 PLAN_TOOLS = frozenset({"propose_actions", "confirm_pending", "cancel_pending"})
 
 # Inmediatas: lectura, o efectos que deben ocurrir en el turno (cambiar de
-# negocio refresca el contexto a mitad de turno; drive_send_file entrega el
-# archivo a este mismo chat y no cambia datos).
+# negocio refresca el contexto a mitad de turno; drive_send_file y export_records
+# entregan un archivo a este mismo chat y no cambian datos).
 IMMEDIATE_TOOLS = frozenset(
     {
         "search_clients", "get_client", "drive_search", "drive_read", "drive_send_file",
         "search_finance", "get_client_balance", "gmail_search", "gmail_read", "calendar_list_events",
         "recall_chat_history", "list_my_businesses", "switch_business", "switch_to_platform_admin",
-        "list_pqrs", "list_record_types", "search_records", "summarize_records", "list_reminders",
+        "list_pqrs", "list_record_types", "search_records", "summarize_records", "export_records", "list_reminders",
         "list_tenants", "get_chat_memberships", "get_default_reminder_templates", "get_current_datetime",
     }
 ) | PLAN_TOOLS

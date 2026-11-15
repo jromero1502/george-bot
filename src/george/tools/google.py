@@ -200,10 +200,26 @@ def _meet_link(event: dict[str, Any]) -> Optional[str]:
     return None
 
 
+# Paleta de colores de evento de Google Calendar (colorId 1-11).
+_EVENT_COLORS: dict[str, str] = {
+    "lavanda": "1", "salvia": "2", "uva": "3", "flamenco": "4", "banano": "5", "mandarina": "6",
+    "pavo_real": "7", "grafito": "8", "arandano": "9", "albahaca": "10", "tomate": "11",
+}
+_COLOR_NAMES = {v: k for k, v in _EVENT_COLORS.items()}
+
+
+def _color_id(name: str) -> str:
+    try:
+        return _EVENT_COLORS[name.strip().lower()]
+    except KeyError:
+        raise ToolError(f"Color inválido: {name!r}. Opciones: {', '.join(_EVENT_COLORS)}.") from None
+
+
 def _event_view(event: dict[str, Any]) -> dict[str, Any]:
     start, end = event.get("start", {}), event.get("end", {})
     return {
         "event_id": event.get("id"),
+        "color": _COLOR_NAMES.get(event.get("colorId", ""), "predeterminado"),
         "summary": event.get("summary", "(sin título)"),
         "start": start.get("dateTime") or start.get("date"),
         "end": end.get("dateTime") or end.get("date"),
@@ -265,6 +281,8 @@ def _calendar_create_event(input_: dict[str, Any], ctx: ToolContext) -> str:
     for key, field in (("description", "description"), ("location", "location")):
         if input_.get(key):
             body[field] = input_[key]
+    if input_.get("color"):
+        body["colorId"] = _color_id(input_["color"])
     if input_.get("attendees"):
         body["attendees"] = [{"email": e} for e in input_["attendees"]]
     if input_.get("add_meet"):
@@ -298,6 +316,8 @@ def _calendar_update_event(input_: dict[str, Any], ctx: ToolContext) -> str:
     for key in ("description", "location"):
         if input_.get(key):
             patch[key] = input_[key]
+    if input_.get("color"):
+        patch["colorId"] = _color_id(input_["color"])
     if input_.get("attendees"):
         patch["attendees"] = [{"email": e} for e in input_["attendees"]]
     if input_.get("add_meet"):
@@ -341,6 +361,11 @@ _INVITE_HINT = (
 )
 
 _EVENT_FIELDS: dict[str, Any] = {
+    "color": {
+        "type": "string",
+        "enum": list(_EVENT_COLORS),
+        "description": "Color del evento en el calendario (paleta de Google). Solo si el usuario lo pide o ya usan colores por tipo de evento.",
+    },
     "description": {"type": "string"},
     "location": {"type": "string"},
     "attendees": {"type": "array", "items": {"type": "string"}, "description": "Emails de los invitados"},
